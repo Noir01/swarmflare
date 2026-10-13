@@ -38,7 +38,26 @@ type Entry = { name: string; path: string; kind: "file" | "directory" | "unsuppo
 type ReadResult = { commitOid: string | null; treeOid: string | null; entries: Entry[]; file?: { path: string; content: string }; readme?: string };
 
 function safeError(): Error { return new Error("SOURCE_UNAVAILABLE"); }
-function importInProgress(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "IMPORT_IN_PROGRESS"; }
+function pendingProviderOperation(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && ["CREATE_IN_PROGRESS", "IMPORT_IN_PROGRESS"].includes(String((error as { code?: unknown }).code)); }
+async function bounded<T>(operation: Promise<T>, milliseconds = 10_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(safeError()), milliseconds); })]); }
+  finally { if (timer) clearTimeout(timer); }
+}
+async function getRepo(binding: PlatformArtifactsBinding, name: string): Promise<Repo> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await bounded(binding.get(name)); }
+    catch (error) { if (!pendingProviderOperation(error) || attempt === 2) throw error; }
+  }
+  throw safeError();
+}
+async function revokeInitial(binding: PlatformArtifactsBinding, expectedName: string, token: string): Promise<void> {
+  try {
+    const repo = await getRepo(binding, expectedName);
+    try { if (!await bounded(repo.revokeToken(token))) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED"); }
+    finally { repo[Symbol.dispose](); }
+  } catch { throw new Error("SOURCE_TOKEN_CLEANUP_FAILED"); }
+}
 function validRepoName(name: string): boolean { return /^[A-Za-z0-9_-]{1,100}$/.test(name); }
 function checkedRemote(raw: string): string {
   let u: URL;
@@ -64,9 +83,9 @@ function tokenValid(token: GitToken | string): string {
 async function withInitialToken<T>(repo: Repo, secret: string, fn: (token: string, remote: string) => Promise<T>): Promise<T> {
   let result: T | undefined;
   let failure: unknown;
-  try { result = await fn(tokenValid(secret), checkedRemote((await repo.info()).remote)); } catch { failure = safeError(); }
+  try { result = await fn(tokenValid(secret), checkedRemote((await bounded(repo.info())).remote)); } catch { failure = safeError(); }
   let revoked = false;
-  try { revoked = await repo.revokeToken(secret); } catch { /* fail closed */ }
+  try { revoked = await bounded(repo.revokeToken(secret)); } catch { /* fail closed */ }
   if (!revoked) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED");
   if (failure) throw failure;
   return result as T;
@@ -87,7 +106,7 @@ async function sourceTuple(repo: Repo, ref: string): Promise<{ commitOid: string
   let failure: unknown;
   try {
     tokenValid(token);
-    const remote = checkedRemote((await repo.info()).remote);
+    const remote = checkedRemote((await bounded(repo.info())).remote);
     const refs = await listRefs(remoteFor(remote, token.plaintext), { protocol: 1, prefixes: [ref] });
     const commitOid = refs.get(ref) ?? null;
     if (!commitOid) tuple = { commitOid: null, treeOid: null };
@@ -102,7 +121,7 @@ async function sourceTuple(repo: Repo, ref: string): Promise<{ commitOid: string
     }
   } catch { failure = safeError(); }
   let revoked = false;
-  try { revoked = await repo.revokeToken(token.id ?? token.plaintext); } catch { /* fail closed */ }
+  try { revoked = await bounded(repo.revokeToken(token.id ?? token.plaintext)); } catch { /* fail closed */ }
   if (!revoked) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED");
   if (failure) throw failure;
   return tuple!;
@@ -113,37 +132,48 @@ export async function provisionRepository(binding: PlatformArtifactsBinding | un
   if (input.importUrl !== undefined) {
     if (!await githubImportAllowed(input.importUrl)) throw new Error("IMPORT_NOT_ALLOWED");
     let created: { name: string; remote: string; defaultBranch: string; token: string };
-    try { created = await binding.import({ source: { url: IMPORT_URL, depth: 1 }, target: { name: input.artifactsName, opts: { description: input.description, readOnly: false } } }); } catch { throw safeError(); }
+      try { created = await bounded(binding.import({ source: { url: IMPORT_URL, depth: 1 }, target: { name: input.artifactsName, opts: { description: input.description, readOnly: false } } })); } catch { throw safeError(); }
     let remote: string;
     try { if (created.name !== input.artifactsName) throw safeError(); remote = checkedRemote(created.remote); if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(created.defaultBranch) || created.defaultBranch.includes("..") || created.defaultBranch.endsWith(".lock")) throw safeError(); }
-    catch { try { const cleanup = await binding.get(input.artifactsName); try { await cleanup.revokeToken(created.token); } finally { cleanup[Symbol.dispose](); } } catch { /* provider token cleanup is best effort without handle */ } throw safeError(); }
+    catch { await revokeInitial(binding, input.artifactsName, created.token); throw safeError(); }
     const importedRef = `refs/heads/${created.defaultBranch}`;
     let repo: Repo;
-    try { repo = await binding.get(created.name); } catch (error) {
-      if (importInProgress(error)) return { status: "importing", artifactsName: created.name, remote, ref: importedRef, commitOid: null, treeOid: null, cleanupToken: created.token };
+    try { repo = await getRepo(binding, input.artifactsName); } catch (error) {
+      if (pendingProviderOperation(error)) return { status: "importing", artifactsName: input.artifactsName, remote, ref: importedRef, commitOid: null, treeOid: null, cleanupToken: created.token };
+      await revokeInitial(binding, input.artifactsName, created.token);
       throw safeError();
     }
     try {
       const checked = checkedRemote((await repo.info()).remote);
       if (checked !== remote) throw safeError();
       const tuple = await sourceTuple(repo, importedRef);
-      if (!tuple.commitOid || !tuple.treeOid) return { status: "importing", artifactsName: created.name, remote: checked, ref: importedRef, commitOid: null, treeOid: null, cleanupToken: created.token };
+      if (!tuple.commitOid || !tuple.treeOid) {
+        let revoked = false;
+        try { revoked = await bounded(repo.revokeToken(created.token)); } catch { /* fail closed */ }
+        if (!revoked) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED");
+        return { status: "importing", artifactsName: input.artifactsName, remote: checked, ref: importedRef, commitOid: null, treeOid: null };
+      }
       let revoked = false;
-      try { revoked = await repo.revokeToken(created.token); } catch { /* fail closed */ }
+      try { revoked = await bounded(repo.revokeToken(created.token)); } catch { /* fail closed */ }
       if (!revoked) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED");
       return { status: "ready", artifactsName: created.name, remote: checked, ref: importedRef, ...tuple };
     } catch (error) {
       if (error instanceof Error && error.message === "SOURCE_TOKEN_CLEANUP_FAILED") throw error;
-      try { await repo.revokeToken(created.token); } catch { /* do not leak provider errors */ }
+      try { await bounded(repo.revokeToken(created.token)); } catch { /* do not leak provider errors */ }
       throw safeError();
     } finally { repo[Symbol.dispose](); }
   }
   let created: { name: string; remote: string; token: string };
-  try { created = await binding.create(input.artifactsName, { description: input.description, readOnly: false, setDefaultBranch: "main" }); } catch { throw safeError(); }
-  if (created.name !== input.artifactsName) throw safeError();
-  const remote = checkedRemote(created.remote);
+  try { created = await bounded(binding.create(input.artifactsName, { description: input.description, readOnly: false, setDefaultBranch: "main" })); } catch { throw safeError(); }
+  let remote: string;
+  try { if (created.name !== input.artifactsName) throw safeError(); remote = checkedRemote(created.remote); }
+  catch { await revokeInitial(binding, input.artifactsName, created.token); throw safeError(); }
   let repo: Repo;
-  try { repo = await binding.get(created.name); } catch { throw safeError(); }
+  try { repo = await getRepo(binding, input.artifactsName); } catch (error) {
+    if (pendingProviderOperation(error)) return { status: "importing", artifactsName: input.artifactsName, remote, ref: REF, commitOid: null, treeOid: null, cleanupToken: created.token };
+    await revokeInitial(binding, input.artifactsName, created.token);
+    throw safeError();
+  }
   try {
     return await withInitialToken(repo, created.token, async (token, checked) => {
       if (!input.initializeReadme) return { status: "ready", artifactsName: created.name, remote: checked, ref: REF, commitOid: null, treeOid: null };
@@ -176,14 +206,21 @@ export async function refreshRepository(binding: PlatformArtifactsBinding | unde
   if (!binding || !validRepoName(stored.artifactsName)) throw safeError();
   let repo: Repo;
   try { repo = await binding.get(stored.artifactsName); } catch (error) {
-    if (importInProgress(error)) return { ...stored, status: "importing", commitOid: null, treeOid: null };
+    if (pendingProviderOperation(error)) return { ...stored, status: "importing", commitOid: null, treeOid: null };
     throw safeError();
   }
   try {
-    const remote = checkedRemote((await repo.info()).remote);
+    const remote = checkedRemote((await bounded(repo.info())).remote);
     if (remote !== checkedRemote(stored.remote)) throw safeError();
     const tuple = await sourceTuple(repo, stored.ref);
-    if (!tuple.commitOid || !tuple.treeOid) return { ...stored, status: "importing", remote, commitOid: null, treeOid: null };
+    if (!tuple.commitOid || !tuple.treeOid) {
+      if (stored.cleanupToken) {
+        let revoked = false;
+        try { revoked = await bounded(repo.revokeToken(stored.cleanupToken)); } catch { /* fail closed */ }
+        if (!revoked) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED");
+      }
+      return { status: "importing", artifactsName: stored.artifactsName, remote, ref: stored.ref, commitOid: null, treeOid: null };
+    }
     if (stored.commitOid && (tuple.commitOid !== stored.commitOid || tuple.treeOid !== stored.treeOid)) throw safeError();
     if (stored.cleanupToken) {
       let revoked = false;
@@ -212,7 +249,7 @@ export async function readRepositorySource(binding: PlatformArtifactsBinding | u
       tokenText = tokenValid(token);
       objects = await parsePack(await fetchPack(remoteFor(remote, tokenText), { wants: [stored.commitOid], ofsDelta: true }));
     } finally {
-      let revoked = false; try { revoked = await repo.revokeToken(token.id ?? tokenText); } catch { /* fail closed */ }
+      let revoked = false; try { revoked = await bounded(repo.revokeToken(token.id ?? tokenText)); } catch { /* fail closed */ }
       if (!revoked) throw new Error("SOURCE_TOKEN_CLEANUP_FAILED");
     }
     const byOid = new Map(objects.map(object => [object.sha, object]));

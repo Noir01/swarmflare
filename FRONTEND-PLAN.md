@@ -1,4 +1,9 @@
-# Swarmflare implementation plan — Sol / continuous38
+# Swarmflare implementation plan — Sol / continuous39
+
+## Current integration/deployment tranche
+Actual development HEAD 176d1ca is already signed/pushed and independently verified through GitHub. Previous local account/Git-backed/browser work exists; STATUS/NEXT historical human pause is superseded. Current GITHUB-HANDOFF authorizes GitHub Actions using the dedicated existing secret, not native Workers Builds (user ruled that out). No new credential request or account connection.
+
+This tranche: bounded Luna source cleanup/provider compatibility and Actions workflow/build contract work; Sol independently verifies changes, signs/pushes coherent development milestones, reads exact Actions/deployment results and exercises native account-owned create/import/source with short-lived synthetic test identities. Preserve existing Project DO/source/candidate and all private deployment secrets, use --keep-vars, retain bounded expiry and CPU100ms. The public catalog must be explicitly empty/unavailable when nothing is provisioned; no synthetic records deployed. Human task approval/final acceptance stays reserved. Dynamic per-repo runner/source integration remains a separate foundation, not inferred from repository creation.
 
 ## Current executable tranche
 Fresh inspection on WSL: development at 5f1e62f; account-to-project router imported but absent, account test uses invalid short password, source module has no exercised import lifecycle, candidate renderer misreads real review-artifact/check resources. Historical STATUS/NEXT human pause does not govern redesign. Deadline from current continuous38 metadata; execution controls remain read-only.

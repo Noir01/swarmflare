@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import { env } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
 import worker from '../../apps/worker/src/index';
 
 import { acceptanceFixture } from './acceptance-fixture';
@@ -71,7 +72,14 @@ it('refreshes an artifact under a new request ID, refuses stale applicability, a
   const expiring=await f.request('runner',path,makePayload('<h1>expired</h1>',Date.now()+3_000),undefined,'preview-expiring');expect(expiring.status,JSON.stringify(expiring.body)).toBe(201);
   const readable=await f.request('human',`/views/${f.view.id}/review-artifact`);
   expect(readable.body.resource.data.diff.patch).toBe('');
-  await new Promise(resolve=>setTimeout(resolve,3_100));
+  // workerd's cached clock need not advance with a Node-side sleep. Make
+  // only this emulator artifact expired, as in the acceptance clock fixtures.
+  const stub=env.PROJECTS.get(env.PROJECTS.idFromName(f.projectId));
+  await runInDurableObject(stub,async (_instance,state)=>{
+    const row=state.storage.sql.exec<{id:string,data:string}>('SELECT id,data FROM resources WHERE id=?',expiring.body.resource.id).one();
+    const data=JSON.parse(row.data);data.preview.expiresAt=Date.now()-1;
+    state.storage.sql.exec('UPDATE resources SET data=? WHERE id=?',JSON.stringify(data),row.id);
+  });
   const bindings=await dashboardBindings(f.projectId),{cookie}=await dashboardLogin(bindings,f.projectId);
   expect((await worker.fetch(dashboardRequest(`/dashboard/preview/${f.view.id}`,{Cookie:cookie}),bindings)).status).toBe(404);
 });

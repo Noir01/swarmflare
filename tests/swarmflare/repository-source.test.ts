@@ -100,6 +100,13 @@ describe("repository source provisioning", () => {
     expect(git(bare, "for-each-ref", "--format=%(refname)")).toBe("");
   });
 
+  it("revokes the initial token when returned create metadata is invalid", async () => {
+    const badRemote = "https://attacker.example/git/default/repo.git";
+    const artifacts = { ...binding(badRemote), create: async (name: string) => ({ name, remote: badRemote, token }) };
+    await expect(provisionRepository(artifacts, { artifactsName: "sf-invalid-remote", name: "x", description: "", initializeReadme: false })).rejects.toThrow("SOURCE_UNAVAILABLE");
+    expect(revokedTokens).toEqual([token]);
+  });
+
   it("refuses imports outside the sole approved canonical URL before network access", async () => {
     const artifacts = { ...binding("https://acct.artifacts.cloudflare.net/git/default/repo.git"), import: vi.fn() };
     await expect(provisionRepository(artifacts, { artifactsName: "sf-import", name: "x", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/other" })).rejects.toThrow("IMPORT_NOT_ALLOWED");
@@ -131,13 +138,14 @@ describe("repository source provisioning", () => {
       get: async () => repo,
     };
     const pending = await provisionRepository(artifacts, { artifactsName: "sf-import", name: "Hello", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/Hello-World" });
-    expect(pending).toMatchObject({ status: "importing", cleanupToken: initial, commitOid: null, treeOid: null });
+    expect(pending).toMatchObject({ status: "importing", commitOid: null, treeOid: null });
+    expect(pending.cleanupToken).toBeUndefined();
     git(seed, "remote", "add", "target", bare); git(seed, "push", "target", "main");
     const ready = await refreshRepository(artifacts, pending);
     expect(ready.status).toBe("ready"); expect(ready.commitOid).toBe(git(seed, "rev-parse", "HEAD"));
     expect(ready.treeOid).toBe(git(seed, "rev-parse", "HEAD^{tree}"));
     expect(git(bare, "show", "refs/heads/main:README.md")).toBe("# Imported fixture");
-    expect(revokedTokens).toEqual(["read-import", "read-import", initial]);
+    expect(revokedTokens).toEqual(["read-import", initial, "read-import"]);
   });
 
   it("releases an invalid read token before reporting a token-validation failure", async () => {

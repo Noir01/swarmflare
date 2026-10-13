@@ -17,19 +17,19 @@ npm run check:swarmflare
 
 `check:swarmflare` performs typecheck, serial supported account/catalog/source/site/task/deployment tests, targeted Worker authentication/review/acceptance-security tests, then `build:swarmflare`. That build is a Wrangler dry-run; it lists `PROJECTS`, `PLATFORM` and `ARTIFACTS` without uploading resources. The full supported-host regression and Chromium journey are separate release qualifications, not omitted acceptance requirements.
 
+The repository's `.github/workflows/deploy-development.yml` runs this gate and then deploys only on pushes to `development` or a manual dispatch. It uses the repository secret `CLOUDFLARE_API_TOKEN` and the explicit Purdue account ID. The token's validity and permissions are not proven until an Actions deployment succeeds.
+
 For an authorized deployment from the same verified source:
 
 ```sh
 npm run deploy:swarmflare
 ```
 
-Run the build gate before deployment. Native Workers Builds should use development branch `Noir01/swarmflare`, root directory `/`, build command `npm ci && npm run check:swarmflare`, deployment command `npm run deploy:swarmflare`. Do not configure preview branches against this retained demo state. Verify exact resulting deployment/version and binding names by readback before calling automation working.
+The deploy script uses `--keep-vars` so existing Worker variables/secrets are retained. The workflow is bounded to 10 minutes, serializes this project's deployments without cancelling an in-progress run, and does not run the isolated-browser suite. It does not renew the demo expiry. Verify the exact resulting deployment/version and binding names by readback before calling automation working.
 
 ## Automation credential boundary
 
-Automated deployment is authorized but NOT connected. The current GitHub OAuth account has repo access but no workflow scope. A GitHub Actions workflow push requires the user to run `gh auth refresh -h github.com -s workflow` from their WSL terminal. This source milestone does not create a workflow or ask for a personal Cloudflare credential.
-
-The alternative is user installation/connection of Cloudflare Workers Builds for this existing project Worker in Settings/Builds, selecting the private repository and development branch above. Do not copy existing personal Cloudflare OAuth/refresh tokens into GitHub secrets or automation. Actions requires a dedicated, appropriately scoped credential and exact account/project targeting; native Workers Builds uses its own approved installation. No setup is verified until an actual run and version readback succeed.
+GitHub Actions deployment is configured to use the dedicated repository secret `CLOUDFLARE_API_TOKEN`, which the coordinator reports is present; its value is never read or copied into source. Native Workers Builds is ruled out because the GitHub account is linked to another Cloudflare account. Do not reconnect it, copy personal Cloudflare OAuth/refresh tokens into GitHub, or request another credential. No automated deployment is claimed until an actual Actions run and exact deployment/version readback succeed.
 
 ## Private state and expiry
 

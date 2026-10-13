@@ -13,7 +13,7 @@
     "test:swarmflare:browser": "npm run test:unit -- --maxWorkers=1 tests/swarmflare/representative.test.ts tests/swarmflare/integrated-browser.test.ts",
     "build:swarmflare": "wrangler deploy --config wrangler.demo.jsonc --dry-run --outdir dist/swarmflare",
     "check:swarmflare": "npm run typecheck && npm run test:swarmflare && npm run test:worker -- --maxWorkers=1 tests/worker/auth.test.ts tests/worker/http.test.ts tests/worker/demo-ingress.test.ts tests/worker/review-artifact.test.ts tests/worker/acceptance-security.test.ts && npm run build:swarmflare",
-    "deploy:swarmflare": "wrangler deploy --config wrangler.demo.jsonc"
+    "deploy:swarmflare": "wrangler deploy --config wrangler.demo.jsonc --keep-vars"
   },
   "dependencies": {"zod": "4.6.5"},
   "devDependencies": {
