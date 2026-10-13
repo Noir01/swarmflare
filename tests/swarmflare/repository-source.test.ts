@@ -92,6 +92,18 @@ describe("repository source provisioning", () => {
     await expect(readRepositorySource(binding(remote), repo, "%2e%2e/README.md")).rejects.toThrow("INVALID_SOURCE_PATH");
   });
 
+  it("reads an imported extensionless README from actual Git source", async () => {
+    scratch = await mkdtemp(join(tmpdir(), "swarmflare-readme-name-")); await mkdir(join(scratch, "home"));
+    const { remote, bare } = await localGitHttp();
+    const seed = join(scratch, "seed"); await mkdir(seed);
+    git(seed, "init", "-q", "--initial-branch=master");
+    git(seed, "config", "user.name", "Fixture"); git(seed, "config", "user.email", "fixture@example.invalid");
+    await import("node:fs/promises").then(({ writeFile }) => writeFile(join(seed, "README"), "Hello World!\n"));
+    git(seed, "add", "README"); git(seed, "commit", "-qm", "fixture README"); git(seed, "push", bare, "master");
+    const stored: ProvisionedSource = { status: "ready", artifactsName: "sf-readme", remote, ref: "refs/heads/master", commitOid: git(seed,"rev-parse","HEAD"), treeOid: git(seed,"rev-parse","HEAD^{tree}") };
+    expect((await readRepositorySource(binding(remote),stored,"")).readme).toBe("Hello World!\n");
+  });
+
   it("leaves an empty repository genuinely empty", async () => {
     scratch = await mkdtemp(join(tmpdir(), "swarmflare-source-empty-")); await mkdir(join(scratch, "home"));
     const { remote, bare } = await localGitHttp();
@@ -127,7 +139,7 @@ describe("repository source provisioning", () => {
     const importMock = vi.fn(async () => { throw new Error("provider import fixture stop"); });
     const artifacts = { ...binding("https://acct.artifacts.cloudflare.net/git/default/repo.git"), import: importMock };
     await expect(provisionRepository(artifacts, { artifactsName: "sf-import", name: "x", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/Hello-World" })).rejects.toThrow("SOURCE_UNAVAILABLE");
-    expect(importMock).toHaveBeenCalledWith({ source: { url: "https://github.com/octocat/Hello-World", depth: 1 }, target: { name: "sf-import", opts: { description: "", readOnly: false } } });
+    expect(importMock).toHaveBeenCalledWith({ source: { url: "https://github.com/octocat/Hello-World", branch: "master", depth: 1 }, target: { name: "sf-import", opts: { description: "", readOnly: false } } });
     const gitCalls = calls.filter(call => new URL(call.url).hostname === "github.com");
     expect(gitCalls).toHaveLength(2);
     for (const call of gitCalls) {
@@ -150,7 +162,7 @@ describe("repository source provisioning", () => {
     scratch = await mkdtemp(join(tmpdir(), "swarmflare-import-")); await mkdir(join(scratch, "home"));
     const { remote, bare } = await localGitHttp();
     const seed = join(scratch, "seed"); await mkdir(seed);
-    git(seed, "init", "-q", "--initial-branch=main");
+    git(seed, "init", "-q", "--initial-branch=master");
     execFileSync("git", ["-C", seed, "config", "user.name", "Fixture"]); execFileSync("git", ["-C", seed, "config", "user.email", "fixture@example.invalid"]);
     await import("node:fs/promises").then(({ writeFile }) => writeFile(join(seed, "README.md"), "# Imported fixture\n"));
     git(seed, "add", "README.md"); git(seed, "commit", "-qm", "fixture");
@@ -165,19 +177,21 @@ describe("repository source provisioning", () => {
     });
     const initial = `art_v1_${"b".repeat(40)}?expires=${Math.floor(Date.now() / 1000) + 240}`;
     const repo = { info: async () => ({ remote }), createToken: async () => ({ id: "read-import", plaintext: token, expiresAt: new Date(Number(token.split("=").at(-1)) * 1000).toISOString() }), revokeToken: async (value: string) => { revokedTokens.push(value); return true; }, [Symbol.dispose]() {} };
+    const importMock = vi.fn(async () => ({ name: "sf-import", remote, defaultBranch: "main", token: initial }));
     const artifacts: PlatformArtifactsBinding = {
       create: async () => { throw new Error("not used"); },
-      import: async () => ({ name: "sf-import", remote, defaultBranch: "main", token: initial }),
+      import: importMock,
       get: async () => repo,
     };
     const pending = await provisionRepository(artifacts, { artifactsName: "sf-import", name: "Hello", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/Hello-World" });
-    expect(pending).toMatchObject({ status: "importing", commitOid: null, treeOid: null });
+    expect(importMock).toHaveBeenCalledWith({ source: { url: "https://github.com/octocat/Hello-World", branch: "master", depth: 1 }, target: { name: "sf-import", opts: { description: "", readOnly: false } } });
+    expect(pending).toMatchObject({ status: "importing", ref: "refs/heads/master", commitOid: null, treeOid: null });
     expect(pending.cleanupToken).toBeUndefined();
-    git(seed, "remote", "add", "target", bare); git(seed, "push", "target", "main");
+    git(seed, "remote", "add", "target", bare); git(seed, "push", "target", "master");
     const ready = await refreshRepository(artifacts, pending);
-    expect(ready.status).toBe("ready"); expect(ready.commitOid).toBe(git(seed, "rev-parse", "HEAD"));
+    expect(ready).toMatchObject({ status: "ready", ref: "refs/heads/master" }); expect(ready.commitOid).toBe(git(seed, "rev-parse", "HEAD"));
     expect(ready.treeOid).toBe(git(seed, "rev-parse", "HEAD^{tree}"));
-    expect(git(bare, "show", "refs/heads/main:README.md")).toBe("# Imported fixture");
+    expect(git(bare, "show", "refs/heads/master:README.md")).toBe("# Imported fixture");
     expect(revokedTokens).toEqual(["read-import", initial, "read-import"]);
   });
 

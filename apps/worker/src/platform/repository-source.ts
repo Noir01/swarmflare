@@ -22,7 +22,7 @@ type Repo = {
 };
 export type PlatformArtifactsBinding = {
   create(name: string, opts: { description: string; readOnly: false; setDefaultBranch: "main" }): Promise<{ name: string; remote: string; token: string }>;
-  import(params: { source: { url: string; depth: 1 }; target: { name: string; opts: { description: string; readOnly: false } } }): Promise<{ name: string; remote: string; defaultBranch: string; token: string }>;
+  import(params: { source: { url: string; branch: "master"; depth: 1 }; target: { name: string; opts: { description: string; readOnly: false } } }): Promise<{ name: string; remote: string; defaultBranch: string; token: string }>;
   get(name: string): Promise<Repo>;
 };
 export type ProvisionedSource = {
@@ -142,11 +142,11 @@ export async function provisionRepository(binding: PlatformArtifactsBinding | un
     if (check === "denied") throw new Error("IMPORT_NOT_ALLOWED");
     if (check === "unavailable" && !await githubGitFallbackAllowed()) throw new Error("IMPORT_SOURCE_UNAVAILABLE");
     let created: { name: string; remote: string; defaultBranch: string; token: string };
-      try { created = await bounded(binding.import({ source: { url: IMPORT_URL, depth: 1 }, target: { name: input.artifactsName, opts: { description: input.description, readOnly: false } } })); } catch { throw safeError(); }
+      try { created = await bounded(binding.import({ source: { url: IMPORT_URL, branch: "master", depth: 1 }, target: { name: input.artifactsName, opts: { description: input.description, readOnly: false } } })); } catch { throw safeError(); }
     let remote: string;
     try { if (created.name !== input.artifactsName) throw safeError(); remote = checkedRemote(created.remote); if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(created.defaultBranch) || created.defaultBranch.includes("..") || created.defaultBranch.endsWith(".lock")) throw safeError(); }
     catch { await revokeInitial(binding, input.artifactsName, created.token); throw safeError(); }
-    const importedRef = `refs/heads/${created.defaultBranch}`;
+    const importedRef = "refs/heads/master";
     let repo: Repo;
     try { repo = await getRepo(binding, input.artifactsName); } catch (error) {
       if (pendingProviderOperation(error)) return { status: "importing", artifactsName: input.artifactsName, remote, ref: importedRef, commitOid: null, treeOid: null, cleanupToken: created.token };
@@ -298,7 +298,7 @@ export async function readRepositorySource(binding: PlatformArtifactsBinding | u
     }
     let readme: string | undefined;
     if (!safe) {
-      const entry = decodeTree(treeObj.data).find(child => child.name === "README.md" && child.mode === "100644");
+      const entry = decodeTree(treeObj.data).find(child => /^readme(?:\.(?:md|markdown|txt|rst))?$/i.test(child.name) && child.mode === "100644");
       const blob = entry && byOid.get(entry.sha);
       if (entry && blob?.type === "blob" && blob.data.length <= MAX_README && await hashObject(blob) === entry.sha) readme = new TextDecoder("utf-8", { fatal: true }).decode(blob.data);
     }

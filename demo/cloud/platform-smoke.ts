@@ -68,7 +68,7 @@ async function main(phase: Phase) {
       } else {
         const r = await call('/repos', { method: 'POST', ...session, body: { name: `import-${randomBytes(5).toString('hex')}`, description: 'Synthetic public import probe', importUrl: 'https://github.com/octocat/Hello-World' }, expected: 201 }); state.imported = r.data.repository;await save(state);
       }
-      for (let n = 0; state.imported.status === 'importing' && n < 5; n++) { await new Promise(resolve=>setTimeout(resolve,500));const x = await call(`/repos/${state.imported.owner}/${state.imported.name}/refresh`, { method: 'POST', ...session }); state.imported = x.data.repository;await save(state); }
+      for (let n = 0; state.imported.status === 'importing' && n < 5; n++) { await new Promise(resolve=>setTimeout(resolve,500));const selectInitialBranch=state.imported.source?.ref==='refs/heads/main'&&!state.imported.source?.commitOid&&!state.imported.source?.treeOid;const x = await call(`/repos/${state.imported.owner}/${state.imported.name}/refresh`, { method: 'POST', ...session,body:selectInitialBranch?{ref:'refs/heads/master'}:{} }); state.imported = x.data.repository;await save(state); }
       if (state.imported.status !== 'ready') throw new Error('import pending or failed');
       const source = await call(`/repos/${state.imported.owner}/${state.imported.name}/source`); if (source.data.commitOid !== state.imported.source?.commitOid || source.data.treeOid !== state.imported.source?.treeOid) throw new Error('source mismatch');
     } else if (phase === 'grants') {

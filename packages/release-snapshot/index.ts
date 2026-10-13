@@ -60,9 +60,13 @@ export function createReleaseSnapshot(repositoryRoot: string): ReleaseSnapshot {
       paths.add(path);
     }
   }
-  for (const path of ['REVIEW.md', 'wrangler.demo.jsonc']) {
+  for (const path of ['REVIEW.md', 'wrangler.demo.jsonc', '.github/workflows/deploy-development.yml']) {
     const optionalFile = join(root, path);
     try {
+      if(path.startsWith('.github/'))for(const directory of ['.github','.github/workflows']){
+        const parent=lstatSync(join(root,directory));
+        if(parent.isSymbolicLink()||!parent.isDirectory())throw new Error(`Refusing unsafe deployment workflow directory: ${directory}`);
+      }
       const info = lstatSync(optionalFile);
       if (info.isSymbolicLink()) throw new Error(`Refusing symlink in optional root file: ${path}`);
       if (!info.isFile()) throw new Error(`Refusing non-file optional root document: ${path}`);

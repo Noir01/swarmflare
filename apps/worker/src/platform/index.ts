@@ -14,6 +14,7 @@ const signupSchema = z.object({ username: z.string().regex(/^[a-z0-9-]{3,32}$/i)
 const loginSchema = z.object({ login: z.string().trim().min(1).max(254), password: z.string().min(1).max(128) }).strict();
 const repoSchema = z.object({ name: z.string().regex(/^[a-z0-9-]{3,64}$/i).transform(v => v.toLowerCase()), description: z.string().max(500).optional(), initializeReadme: z.boolean().optional(), importUrl: z.string().max(512).optional() }).strict();
 const importRetrySchema = z.object({ importUrl: z.string().min(1).max(512) }).strict();
+const importRefreshSchema = z.object({ ref: z.literal('refs/heads/master') }).strict();
 const grantSchema = z.object({ role: z.enum(['contributor', 'reviewer']), expiresInSeconds: z.number().int().min(60).max(3600) }).strict();
 const safeSource = (s: ProvisionedSource) => ({ ref: s.ref, commitOid: s.commitOid, treeOid: s.treeOid });
 
@@ -120,7 +121,13 @@ export class Platform extends DurableObject<Env> {
           if (!this.writeAllowed(request, session) || session!.user.id !== row.ownerId) return fail('FORBIDDEN', 'Repository owner required', 403);
           if (row.status !== 'importing') return fail('INVALID_STATE', 'Repository is not importing', 409);
           const stored = this.sourceFrom(row); if (!stored) return fail('INVALID_STATE', 'Repository source is unavailable', 409);
-          try { const refreshed = await refreshRepository(this.env.ARTIFACTS, stored); this.ctx.storage.sql.exec('UPDATE repos SET status=?,source=?,error=NULL WHERE id=?', refreshed.status, JSON.stringify(refreshed), row.id); }
+          const body = await this.body(request);
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'ref')) return fail('INVALID_REQUEST', 'Invalid repository refresh details', 400);
+          const selected = Object.hasOwn(body, 'ref') ? this.parsed(importRefreshSchema, body) : { ref: undefined };
+          if (!selected) return fail('INVALID_REQUEST', 'Invalid repository refresh details', 400);
+          if (selected.ref && selected.ref !== stored.ref && (stored.commitOid !== null || stored.treeOid !== null)) return fail('INVALID_STATE', 'Repository source identity is already assigned', 409);
+          const refreshInput = selected.ref ? { ...stored, ref: selected.ref } : stored;
+          try { const refreshed = await refreshRepository(this.env.ARTIFACTS, refreshInput); this.ctx.storage.sql.exec('UPDATE repos SET status=?,source=?,error=NULL WHERE id=?', refreshed.status, JSON.stringify(refreshed), row.id); }
           catch { this.ctx.storage.sql.exec("UPDATE repos SET status='failed',error='SOURCE_UNAVAILABLE' WHERE id=?", row.id); }
           const next = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE id=?', row.id)!;
           return json({ repository: this.repo(next) });

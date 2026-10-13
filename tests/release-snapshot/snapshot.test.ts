@@ -32,6 +32,15 @@ function fixture() {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('local release snapshot', () => {
+  it('includes the public deployment workflow but not private GitHub state', () => {
+    const root=fixture();mkdirSync(join(root,'.github/workflows'),{recursive:true});
+    writeFileSync(join(root,'.github/workflows/deploy-development.yml'),'name: Deploy Swarmflare development\n');
+    writeFileSync(join(root,'.github/credential.json'),'DO_NOT_PACKAGE');
+    const paths=createReleaseSnapshot(root).manifest.files.map(f=>f.path);
+    expect(paths).toContain('.github/workflows/deploy-development.yml');
+    expect(paths).not.toContain('.github/credential.json');
+  });
+
   it('is deterministic, content-addressed, excludes state/secrets and extracts to runnable source', () => {
     const root = fixture();
     mkdirSync(join(root, '.local')); writeFileSync(join(root, '.local/secret'), 'DO_NOT_READ');
