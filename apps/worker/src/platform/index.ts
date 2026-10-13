@@ -90,6 +90,7 @@ export class Platform extends DurableObject<Env> {
       }
       if (path === '/auth/logout' && method === 'POST') { const s = await this.session(request); if (s && !this.writeAllowed(request, s)) return fail('CSRF', 'CSRF token invalid', 403); if (s) this.ctx.storage.sql.exec('DELETE FROM sessions WHERE token=?', await sha256(s.token)); return json({ ok: true }, 200, { 'Set-Cookie': cookie('', 0) }); }
       if (path === '/internal/authorize-project' && method === 'POST') return this.authorizeProject(request);
+      if (path === '/internal/source-config' && method === 'POST') return this.sourceConfig(request);
       const session = await this.session(request);
       const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh|retry)(?:\/([^/]+))?)?$/);
       if (path === '/repos' && method === 'GET') return json({ repositories: this.rows<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos ORDER BY created DESC').map(row => this.repo(row)) });
@@ -158,6 +159,16 @@ export class Platform extends DurableObject<Env> {
       }
       return fail('NOT_FOUND', 'Not found', 404);
     } catch (error) { const large = error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE'; return fail(large ? 'PAYLOAD_TOO_LARGE' : 'INVALID_REQUEST', large ? 'Request body too large' : 'Invalid request', large ? 413 : 400); }
+  }
+  private async sourceConfig(request: Request): Promise<Response> {
+    if (request.headers.get('x-swarmflare-internal') !== 'project-worker') return fail('FORBIDDEN', 'Trusted project Worker request required', 403);
+    const payload = this.parsed(z.object({ projectId: z.string().regex(/^[A-Za-z0-9_-]{1,120}$/) }).strict(), await this.body(request));
+    if (!payload) return fail('INVALID_REQUEST', 'Invalid source configuration request', 400);
+    const row = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE project=?', payload.projectId);
+    if (!row) return fail('PROJECT_UNMAPPED', 'Project is not mapped to a repository', 404);
+    const stored = this.sourceFrom(row);
+    if (row.status !== 'ready' || !stored || stored.status !== 'ready' || !stored.commitOid || !stored.treeOid || !stored.remote || !stored.artifactsName) return fail('SOURCE_NOT_READY', 'Repository source is not ready', 409);
+    return json({ config: { projectId: row.project, repository: row.artifacts, remote: stored.remote, allowWrites: true }, repositoryId: row.id, ownerId: row.ownerId, source: safeSource(stored) });
   }
   private async authorizeProject(request: Request): Promise<Response> {
     const trusted = request.headers.get('x-swarmflare-internal') === 'platform-worker';
