@@ -1,6 +1,5 @@
-import { Project } from './project/index';
-import { route } from './http/router';
-import { dashboard } from './http/dashboard';
+import worker from './index';
+export { Project, Platform } from './index';
 
 type DemoEnv = Env & {
   AUTH_CREDENTIALS?: string;
@@ -14,11 +13,11 @@ const expired = (env: DemoEnv): boolean => {
   return !Number.isFinite(deadline) || deadline <= Date.now();
 };
 
-export { Project };
 export default {
   async fetch(request: Request, env: DemoEnv): Promise<Response> {
     if (expired(env)) return Response.json({ code: 'DEMO_EXPIRED', message: 'Demo unavailable' }, { status: 410 });
-    if (new URL(request.url).pathname.startsWith('/dashboard')) return dashboard(request, env);
-    return route(request, env);
+    // Preserve the legacy project, credentials and expiry while serving the
+    // account-backed product through the same project-only deployment.
+    return worker.fetch(request, env);
   },
 } satisfies ExportedHandler<DemoEnv>;

@@ -38,6 +38,7 @@ type Entry = { name: string; path: string; kind: "file" | "directory" | "unsuppo
 type ReadResult = { commitOid: string | null; treeOid: string | null; entries: Entry[]; file?: { path: string; content: string }; readme?: string };
 
 function safeError(): Error { return new Error("SOURCE_UNAVAILABLE"); }
+function importInProgress(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "IMPORT_IN_PROGRESS"; }
 function validRepoName(name: string): boolean { return /^[A-Za-z0-9_-]{1,100}$/.test(name); }
 function checkedRemote(raw: string): string {
   let u: URL;
@@ -118,8 +119,9 @@ export async function provisionRepository(binding: PlatformArtifactsBinding | un
     catch { try { const cleanup = await binding.get(input.artifactsName); try { await cleanup.revokeToken(created.token); } finally { cleanup[Symbol.dispose](); } } catch { /* provider token cleanup is best effort without handle */ } throw safeError(); }
     const importedRef = `refs/heads/${created.defaultBranch}`;
     let repo: Repo;
-    try { repo = await binding.get(created.name); } catch {
-      return { status: "importing", artifactsName: created.name, remote, ref: importedRef, commitOid: null, treeOid: null, cleanupToken: created.token };
+    try { repo = await binding.get(created.name); } catch (error) {
+      if (importInProgress(error)) return { status: "importing", artifactsName: created.name, remote, ref: importedRef, commitOid: null, treeOid: null, cleanupToken: created.token };
+      throw safeError();
     }
     try {
       const checked = checkedRemote((await repo.info()).remote);
@@ -173,7 +175,10 @@ export async function provisionRepository(binding: PlatformArtifactsBinding | un
 export async function refreshRepository(binding: PlatformArtifactsBinding | undefined, stored: ProvisionedSource): Promise<ProvisionedSource> {
   if (!binding || !validRepoName(stored.artifactsName)) throw safeError();
   let repo: Repo;
-  try { repo = await binding.get(stored.artifactsName); } catch { return { ...stored, status: "importing", commitOid: null, treeOid: null }; }
+  try { repo = await binding.get(stored.artifactsName); } catch (error) {
+    if (importInProgress(error)) return { ...stored, status: "importing", commitOid: null, treeOid: null };
+    throw safeError();
+  }
   try {
     const remote = checkedRemote((await repo.info()).remote);
     if (remote !== checkedRemote(stored.remote)) throw safeError();
@@ -201,9 +206,10 @@ export async function readRepositorySource(binding: PlatformArtifactsBinding | u
     if (remote !== checkedRemote(stored.remote)) throw safeError();
     if (!stored.commitOid || !stored.treeOid) return { commitOid: null, treeOid: null, entries: [] };
     const token = await repo.createToken("read", 300);
-    const tokenText = tokenValid(token);
+    let tokenText = token.plaintext;
     let objects;
     try {
+      tokenText = tokenValid(token);
       objects = await parsePack(await fetchPack(remoteFor(remote, tokenText), { wants: [stored.commitOid], ofsDelta: true }));
     } finally {
       let revoked = false; try { revoked = await repo.revokeToken(token.id ?? tokenText); } catch { /* fail closed */ }

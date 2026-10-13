@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -50,21 +50,26 @@ export async function launchIsolatedBrowser(options: { timeoutMs?: number } = {}
     lookup.once('error', error => fail(error));
     lookup.once('close', code => {
       if (settled) return;
-      if (code === 0 && output.startsWith('/nix/store/') && !output.includes('..') && !/[<>"'&]/.test(output)) { settled = true; clearTimeout(timer); resolve(output); }
-      else fail(new Error('Could not resolve canonical sans-serif font inside /nix/store'));
+      if (code === 0 && (output.startsWith('/nix/store/') || output.startsWith('/usr/share/fonts/')) && !output.includes('..') && !/[\x00-\x1f<>"'&]/.test(output)) { settled = true; clearTimeout(timer); resolve(output); }
+      else fail(new Error('Could not resolve a system sans-serif font'));
     });
   });
-  const fontDir = dirname(fontResult);
+  // WSL has system fonts outside Nix. Expose only the selected system font
+  // directory read-only, not the host filesystem, home, or network namespace.
+  const canonicalFont = await realpath(fontResult);
+  if (!(canonicalFont.startsWith('/nix/store/') || canonicalFont.startsWith('/usr/share/fonts/')) || !(await stat(canonicalFont)).isFile()) throw new Error('Font is outside supported system font roots');
+  const fontDir = dirname(canonicalFont);
+  const sandboxFontDir = '/run/swarmflare-fonts';
   const fontConfigDir = await mkdtemp(join(tmpdir(), 'isolated-browser-fontconfig-'));
   const fontConfig = join(fontConfigDir, 'fonts.conf');
-  const xmlDir = fontDir.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const xmlDir = sandboxFontDir;
   await writeFile(fontConfig, `<?xml version="1.0"?><!DOCTYPE fontconfig SYSTEM "fonts.dtd"><fontconfig><dir>${xmlDir}</dir><cachedir>/tmp/fontconfig-cache</cachedir></fontconfig>`);
   const profile = '/tmp/chromium-profile';
 
   const env: NodeJS.ProcessEnv = { PATH: '/nix/store', HOME: '/tmp', TMPDIR: '/tmp', FONTCONFIG_FILE: '/etc/fonts/fonts.conf', LANG: process.env.LANG ?? 'C.UTF-8', LC_ALL: process.env.LC_ALL };
   const args = [
     '--unshare-all', '--die-with-parent', '--ro-bind', '/nix/store', '/nix/store',
-    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--dir', '/run', '--dir', '/etc', '--dir', '/etc/fonts', '--ro-bind', fontConfig, '/etc/fonts/fonts.conf',
+    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--dir', '/run', '--ro-bind', fontDir, sandboxFontDir, '--dir', '/etc', '--dir', '/etc/fonts', '--ro-bind', fontConfig, '/etc/fonts/fonts.conf',
     '--chdir', '/tmp', '--', chromiumPath,
     '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-extensions',
     '--disable-background-networking', '--disable-component-update', '--disable-sync', '--disable-default-apps',

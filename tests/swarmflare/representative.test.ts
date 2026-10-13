@@ -12,9 +12,9 @@ afterEach(async () => { await browser?.close(); browser = undefined; if (server?
 
 const candidate = {
   id: 'view-local-37', title: 'Add pagination controls', status: 'Ready for review',
-  contract: { outcome: 'Users can move between result pages', obligations: ['Preserve the current query'] },
+  contract: { data: { outcome: 'Users can move between result pages', constraints: ['Preserve the current query'], obligations: [{ id: 'page', description: 'Preserve the current query', acceptanceExamples: [] }], requiredCheckIds: ['unit-tests'], unresolvedQuestions: [] } },
   view: { commitOid: 'a'.repeat(40), treeOid: 'b'.repeat(40) }, readiness: { ready: true },
-  checks: [{ name: 'unit tests', status: 'passed' }], findings: [], artifact: { path: 'src/pagination.ts', content: 'export const pageSize = 20;' },
+  checks: [{ data: { checkId: 'unit tests', result: 'passed' } }], findings: [], artifact: { data: { diff: { files: ['src/pagination.ts'], patch: 'diff --git a/src/pagination.ts b/src/pagination.ts\n+export const pageSize = 20;', truncated: false }, preview: null } },
 };
 const model = { repository: { owner: 'sample-owner', name: 'pagination-demo', description: 'A small example repository for reviewing changes.', status: 'Ready' }, entries: [{ name: 'src', kind: 'directory' }, { name: 'README.md', kind: 'file' }], readme: '# Pagination demo\nBrowse and review a proposed change.', candidates: [candidate], candidate, selectedTab: 'Code', fixture: true };
 

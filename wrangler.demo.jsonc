@@ -8,9 +8,9 @@
   "workers_dev": true,
   "preview_urls": false,
   "durable_objects": {
-    "bindings": [{ "name": "PROJECTS", "class_name": "Project" }]
+    "bindings": [{ "name": "PROJECTS", "class_name": "Project" }, { "name": "PLATFORM", "class_name": "Platform" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Project"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Project"] }, { "tag": "v2", "new_sqlite_classes": ["Platform"] }],
   "artifacts": [
     { "binding": "ARTIFACTS", "namespace": "git-collaboration-demo-c29", "remote": false }
   ],

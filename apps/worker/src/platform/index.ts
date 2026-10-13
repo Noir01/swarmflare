@@ -6,7 +6,7 @@ import { provisionRepository, readRepositorySource, refreshRepository, type Plat
 interface Env { ARTIFACTS?: PlatformArtifactsBinding; PROJECTS: DurableObjectNamespace }
 type RepoRow = { id: string; owner: string; ownerId: string; name: string; description: string; project: string; status: string; created: number; artifacts: string; source: string | null; error: string | null };
 type Session = { user: { id: string; username: string }; csrf: string; expires: number; token: string };
-const json = (value: unknown, status = 200, headers: HeadersInit = {}) => Response.json(value, { status, headers });
+const json = (value: unknown, status = 200, headers: HeadersInit = {}) => { const out = new Headers(headers); out.set('Cache-Control', 'no-store'); return Response.json(value, { status, headers: out }); };
 const fail = (code: string, message: string, status: number) => json({ code, message }, status);
 const cookieName = 'sf_session';
 const cookie = (token: string, age: number) => `${cookieName}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;
@@ -89,7 +89,7 @@ export class Platform extends DurableObject<Env> {
       if (path === '/auth/logout' && method === 'POST') { const s = await this.session(request); if (s && !this.writeAllowed(request, s)) return fail('CSRF', 'CSRF token invalid', 403); if (s) this.ctx.storage.sql.exec('DELETE FROM sessions WHERE token=?', await sha256(s.token)); return json({ ok: true }, 200, { 'Set-Cookie': cookie('', 0) }); }
       if (path === '/internal/authorize-project' && method === 'POST') return this.authorizeProject(request);
       const session = await this.session(request);
-      const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents)(?:\/([^/]+))?)?$/);
+      const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh)(?:\/([^/]+))?)?$/);
       if (path === '/repos' && method === 'GET') return json({ repositories: this.rows<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos ORDER BY created DESC').map(row => this.repo(row)) });
       if (path === '/repos' && method === 'POST') {
         if (!this.writeAllowed(request, session)) return fail('FORBIDDEN', 'Authenticated owner session required', 403);
@@ -147,13 +147,13 @@ export class Platform extends DurableObject<Env> {
   private async authorizeProject(request: Request): Promise<Response> {
     const trusted = request.headers.get('x-swarmflare-internal') === 'platform-worker';
     if (!trusted) return fail('FORBIDDEN', 'Trusted Worker request required', 403);
-    const payload = this.parsed(z.object({ projectId: z.string().uuid(), method: z.string().regex(/^[A-Z]{3,10}$/), path: z.string().max(1024) }).strict(), await this.body(request));
+    const payload = this.parsed(z.object({ projectId: z.string().regex(/^[A-Za-z0-9_-]{1,120}$/), method: z.string().regex(/^[A-Z]{3,10}$/), path: z.string().max(1024) }).strict(), await this.body(request));
     if (!payload) return fail('INVALID_REQUEST', 'Invalid project authorization request', 400);
     const row = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE project=?', payload.projectId);
-    if (!row) return fail('FORBIDDEN', 'Project is not mapped to a repository', 403);
+    if (!row) return fail('PROJECT_UNMAPPED', 'Project is not mapped to a repository', 404);
     if (payload.method === 'GET' && row.status === 'ready') return json({ actor: { id: row.id, projectId: row.project, role: 'contributor', kind: 'public' }, repository: this.repo(row) });
     const s = await this.session(request);
-    if (s && this.writeAllowed(request, s) && s.user.id === row.ownerId) return json({ actor: { id: s.user.id, projectId: row.project, role: 'owner', kind: 'human' }, repository: this.repo(row) });
+    if (s && this.writeAllowed(request, s) && s.user.id === row.ownerId) return json({ actor: { id: s.user.id, projectId: row.project, role: 'human', kind: 'human' }, repository: this.repo(row) });
     const auth = request.headers.get('authorization');
     if (auth && /^Bearer [a-f0-9]{64}$/.test(auth)) {
       const grant = this.one<{ id: string; repo: string; role: string; expires: number }>('SELECT id,repo,role,expires FROM grants WHERE token=? AND revoked=0', await sha256(auth.slice(7)));

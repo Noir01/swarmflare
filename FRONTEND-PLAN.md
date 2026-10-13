@@ -1,4 +1,17 @@
-# Swarmflare implementation plan — Sol / continuous37
+# Swarmflare implementation plan — Sol / continuous38
+
+## Current executable tranche
+Fresh inspection on WSL: development at 5f1e62f; account-to-project router imported but absent, account test uses invalid short password, source module has no exercised import lifecycle, candidate renderer misreads real review-artifact/check resources. Historical STATUS/NEXT human pause does not govern redesign. Deadline from current continuous38 metadata; execution controls remain read-only.
+
+Independent representative gate passed this window: serial Chromium navigation Code -> Candidates -> Files changed -> Checks, two tests passed; coordinator inspected both actual screenshots. Familiar light repository layout, honest fixture banner and progressive details are retained. This is a renderer gate, not backend acceptance.
+
+Staged deliverables for this window:
+1. Luna account/authorization tranche: complete trusted Worker project bridge; distinguish unmapped legacy projects from mapped account repositories, enforce owner+CSRF and agent repo scope, human-only approval/acceptance and runner-only evidence; exercise real SQLite accounts and project mutations.
+2. Luna source tranche: real local Git create/read/import/pending-refresh and token cleanup tests; native binding shapes checked against installed schemas, no guessed read APIs, no private source credentials. Import allowlist remains deliberately bounded.
+3. Luna product tranche: normalize actual Project resources into candidate contract/findings/check/diff views; scoped task form and usable public guide; explicit unavailable/pending/error states; safe preview only under existing artifact safety contract.
+4. Sol integration: browser journey through real local Worker/SQLite and source fixture, focused serial tests and supported milestone regression; finish project-specific deployment bindings/build gates while preserving existing legacy resource state. Sign, verify and push coherent development milestone only, with exact remote readback. Cloud qualification remains distinct from local transport/provider fixtures.
+
+Ownership of edits: account pupil owns platform/index.ts, security.ts, new http/platform-project.ts and account/bridge tests; source pupil owns repository-source.ts and source tests; product pupil owns swarmflare/site.ts, repository.ts, http/site.ts and site tests. Sol owns entrypoints/config/build/local browser integration and checkpoints. Shared existing contracts and Project acceptance/evidence checks are not weakened.
 
 Current authority: FRONTEND-DIRECTION.md and current user message override historical Astra/timing/human-gate instructions. Protected supervisor deadline in .execution/NEXT-WINDOW.json; all execution controls read-only. Preserve existing private cloud demo/candidate; this tranche is local-first, not publication or human acceptance.
 

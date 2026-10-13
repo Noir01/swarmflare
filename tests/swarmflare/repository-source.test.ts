@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { provisionRepository, type PlatformArtifactsBinding } from "../../apps/worker/src/platform/repository-source.js";
+import { provisionRepository, readRepositorySource, refreshRepository, type PlatformArtifactsBinding, type ProvisionedSource } from "../../apps/worker/src/platform/repository-source.js";
 
 let scratch: string | undefined;
 let server: Server | undefined;
@@ -52,10 +52,6 @@ function binding(remote: string): PlatformArtifactsBinding {
     info: async () => ({ remote }),
     createToken: async () => ({ id: "fixture-token", plaintext: token, expiresAt: new Date(Number(token.split("=").at(-1)) * 1000).toISOString() }),
     revokeToken: async (value: string) => { revokedTokens.push(value); return true; },
-    readCommit: async (oid: string) => { try { return { tree: git(join(scratch!, "repos", "git", "default", "repo.git"), "show", "-s", "--format=%T", oid) }; } catch { return null; } },
-    readTree: async (oid: string) => { try { return git(join(scratch!, "repos", "git", "default", "repo.git"), "ls-tree", oid).split("\n").filter(Boolean).map(line => { const match = /^(\d+) (\w+) (\w+)\t(.*)$/.exec(line)!; return { mode: match[1]!, sha: match[3]!, name: match[4]! }; }); } catch { return null; } },
-    readBlob: async (oid: string) => { try { const data = execFileSync("git", ["-C", join(scratch!, "repos", "git", "default", "repo.git"), "cat-file", "blob", oid]); return new Blob([data]); } catch { return null; } },
-    readFile: async ({ ref, path }: { ref: string; path: string }) => { try { const data = execFileSync("git", ["-C", join(scratch!, "repos", "git", "default", "repo.git"), "show", `${ref}:${path}`]); return new Blob([data]); } catch { return null; } },
     [Symbol.dispose]() {},
   };
   return {
@@ -84,6 +80,18 @@ describe("repository source provisioning", () => {
     expect(revokedTokens).toEqual([token]);
   });
 
+  it("reads the exact README and rejects missing or traversal paths", async () => {
+    scratch = await mkdtemp(join(tmpdir(), "swarmflare-source-read-")); await mkdir(join(scratch, "home"));
+    const { remote } = await localGitHttp();
+    const provisioned = await provisionRepository(binding(remote), { artifactsName: "sf-read", name: "Read me", description: "Source readback", initializeReadme: true });
+    const repo = { ...provisioned, status: "ready" as const } as ProvisionedSource;
+    const source = await readRepositorySource(binding(remote), repo, "");
+    expect(source.readme).toBe("# Read me\n\nSource readback\n");
+    await expect(readRepositorySource(binding(remote), repo, "absent.txt")).rejects.toThrow("SOURCE_PATH_NOT_FOUND");
+    await expect(readRepositorySource(binding(remote), repo, "../README.md")).rejects.toThrow("INVALID_SOURCE_PATH");
+    await expect(readRepositorySource(binding(remote), repo, "%2e%2e/README.md")).rejects.toThrow("INVALID_SOURCE_PATH");
+  });
+
   it("leaves an empty repository genuinely empty", async () => {
     scratch = await mkdtemp(join(tmpdir(), "swarmflare-source-empty-")); await mkdir(join(scratch, "home"));
     const { remote, bare } = await localGitHttp();
@@ -96,5 +104,48 @@ describe("repository source provisioning", () => {
     const artifacts = { ...binding("https://acct.artifacts.cloudflare.net/git/default/repo.git"), import: vi.fn() };
     await expect(provisionRepository(artifacts, { artifactsName: "sf-import", name: "x", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/other" })).rejects.toThrow("IMPORT_NOT_ALLOWED");
     expect(artifacts.import).not.toHaveBeenCalled();
+  });
+
+  it("imports the approved public repository and reaches ready only after actual smart-HTTP object readback", async () => {
+    scratch = await mkdtemp(join(tmpdir(), "swarmflare-import-")); await mkdir(join(scratch, "home"));
+    const { remote, bare } = await localGitHttp();
+    const seed = join(scratch, "seed"); await mkdir(seed);
+    git(seed, "init", "-q", "--initial-branch=main");
+    execFileSync("git", ["-C", seed, "config", "user.name", "Fixture"]); execFileSync("git", ["-C", seed, "config", "user.email", "fixture@example.invalid"]);
+    await import("node:fs/promises").then(({ writeFile }) => writeFile(join(seed, "README.md"), "# Imported fixture\n"));
+    git(seed, "add", "README.md"); git(seed, "commit", "-qm", "fixture");
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (new URL(request.url).hostname === "api.github.com") return Response.json({ full_name: "octocat/Hello-World", private: false, size: 1 });
+      const logical = new URL(request.url);
+      if (logical.hostname !== "acct.artifacts.cloudflare.net") return originalFetch(input, init);
+      const local = new URL(`${logical.pathname}${logical.search}`, `http://127.0.0.1:${(server!.address() as AddressInfo).port}`);
+      const headers = new Headers(request.headers); headers.delete("host"); headers.delete("content-length");
+      return originalFetch(local, { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: "manual" });
+    });
+    const initial = `art_v1_${"b".repeat(40)}?expires=${Math.floor(Date.now() / 1000) + 240}`;
+    const repo = { info: async () => ({ remote }), createToken: async () => ({ id: "read-import", plaintext: token, expiresAt: new Date(Number(token.split("=").at(-1)) * 1000).toISOString() }), revokeToken: async (value: string) => { revokedTokens.push(value); return true; }, [Symbol.dispose]() {} };
+    const artifacts: PlatformArtifactsBinding = {
+      create: async () => { throw new Error("not used"); },
+      import: async () => ({ name: "sf-import", remote, defaultBranch: "main", token: initial }),
+      get: async () => repo,
+    };
+    const pending = await provisionRepository(artifacts, { artifactsName: "sf-import", name: "Hello", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/Hello-World" });
+    expect(pending).toMatchObject({ status: "importing", cleanupToken: initial, commitOid: null, treeOid: null });
+    git(seed, "remote", "add", "target", bare); git(seed, "push", "target", "main");
+    const ready = await refreshRepository(artifacts, pending);
+    expect(ready.status).toBe("ready"); expect(ready.commitOid).toBe(git(seed, "rev-parse", "HEAD"));
+    expect(ready.treeOid).toBe(git(seed, "rev-parse", "HEAD^{tree}"));
+    expect(git(bare, "show", "refs/heads/main:README.md")).toBe("# Imported fixture");
+    expect(revokedTokens).toEqual(["read-import", "read-import", initial]);
+  });
+
+  it("releases an invalid read token before reporting a token-validation failure", async () => {
+    const remote = "https://acct.artifacts.cloudflare.net/git/default/repo.git";
+    const repo = { info: async () => ({ remote }), createToken: async () => ({ id: "bad-token", plaintext: "invalid" }), revokeToken: async (value: string) => { revokedTokens.push(value); return true; }, [Symbol.dispose]() {} };
+    const artifacts: PlatformArtifactsBinding = { create: async () => { throw new Error(); }, import: async () => { throw new Error(); }, get: async () => repo };
+    const stored = { status: "ready" as const, artifactsName: "sf-invalid", remote, ref: "refs/heads/main", commitOid: "1".repeat(40), treeOid: "2".repeat(40) };
+    await expect(readRepositorySource(artifacts, stored, "")).rejects.toThrow("SOURCE_UNAVAILABLE");
+    expect(revokedTokens).toEqual(["bad-token"]);
   });
 });
