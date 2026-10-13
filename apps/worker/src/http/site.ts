@@ -1,0 +1,47 @@
+import { siteHtml, siteScript } from '../../../swarmflare/site';
+import { repositoryHtml } from '../../../swarmflare/repository';
+
+type Stub={fetch(request:Request):Promise<Response>};
+type Namespace={idFromName(name:string):unknown;get(id:unknown):Stub};
+type SiteEnv={PLATFORM:Namespace;PROJECTS:Namespace};
+const json=(status:number,data:unknown)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
+const html=(body:string,status=200)=>new Response(body,{status,headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin'}});
+async function platform(env:SiteEnv,path:string,request?:Request){const id=env.PLATFORM.idFromName('swarmflare-platform-v1'),stub=env.PLATFORM.get(id),url=new URL(request?.url??'https://site.internal');const headers=new Headers(request?.headers);headers.delete('host');let body:ArrayBuffer|undefined;if(request?.method&&request.method!=='GET'&&request.method!=='HEAD'){const reader=request.body?.getReader();if(reader){const chunks:Uint8Array[]=[];let size=0;while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>65536){await reader.cancel();throw new RangeError('request too large')}chunks.push(value)}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength}body=bytes.buffer;}}const forwarded=new URL(`${url.origin}/api/platform${path}${url.search}`);return stub.fetch(new Request(forwarded,{method:request?.method??'GET',headers,body,redirect:'manual'}));}
+async function readJson(r:Response){try{return await r.json() as any}catch{return null}}
+const tabs:Record<string,string>={'tasks':'Tasks','changes':'Changes','candidates':'Candidates','settings':'Settings'};
+export async function site(request:Request,env:SiteEnv):Promise<Response>{
+ const url=new URL(request.url),path=url.pathname;
+ if(path==='/assets/swarmflare.js'&&request.method==='GET')return new Response(siteScript,{headers:{'Content-Type':'text/javascript; charset=utf-8','Cache-Control':'public, max-age=300','X-Content-Type-Options':'nosniff'}});
+ if(path==='/skills/swarmflare.md'&&request.method==='GET')return new Response(siteHtml('/skill'),{headers:{'Content-Type':'text/markdown; charset=utf-8','Cache-Control':'public, max-age=300','X-Content-Type-Options':'nosniff'}});
+ if(path.startsWith('/api/platform/')){if(!['GET','POST','DELETE'].includes(request.method))return json(405,{code:'METHOD_NOT_ALLOWED',message:'Method not allowed'});try{return await platform(env,path.slice('/api/platform'.length),request)}catch(e){return json(e instanceof RangeError?413:503,{code:e instanceof RangeError?'BODY_TOO_LARGE':'UNAVAILABLE',message:e instanceof RangeError?'Request body exceeds 64KiB':'Service unavailable'})}}
+ if(path==='/logout'&&request.method==='POST'){try{return await platform(env,'/auth/logout',request)}catch{return json(503,{code:'UNAVAILABLE',message:'Service unavailable'})}}
+ if(request.method!=='GET'&&request.method!=='HEAD')return html(siteHtml('/'),405);
+ let session:any=null;try{const r=await platform(env,'/auth/session',request);if(r.ok)session=await readJson(r)}catch{}
+ const user=session?.user;
+ if(path==='/'||path==='/how-it-works'||path==='/signup'||path==='/login'||path==='/repositories'||path==='/new'){
+  if(path==='/repositories'){try{const r=await platform(env,'/repos',new Request(`${url.origin}/api/platform/repos`));if(!r.ok)return html(siteHtml(path,{repositories:null,user}),503);const d=await readJson(r);if(!Array.isArray(d?.repositories))return html(siteHtml(path,{repositories:null,user}),503);return html(siteHtml(path,{repositories:d.repositories,user}))}catch{return html(siteHtml(path,{repositories:null,user}),503)}}
+  return html(siteHtml(path,{user}));
+ }
+ const match=path.match(/^\/([^/]+)\/([^/]+)(?:\/(tasks|changes|candidates|settings))?$/);
+ const candidateMatch=path.match(/^\/([^/]+)\/([^/]+)\/candidates\/([^/]+)$/);
+ if(!match&&!candidateMatch)return html(siteHtml('/not-found',{user}),404);
+ const owner=decodeURIComponent((candidateMatch??match)![1]!),name=decodeURIComponent((candidateMatch??match)![2]!);
+ if(!/^[a-z0-9-]{3,32}$/.test(owner)||!/^[a-z0-9-]{3,64}$/.test(name))return html(siteHtml('/not-found',{user}),404);
+ try{
+  const metaRes=await platform(env,`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`);if(!metaRes.ok)return html(siteHtml('/not-found',{user}),metaRes.status===404?404:503);
+  const meta=await readJson(metaRes),repo=meta?.repository;if(!repo?.projectId)return html(siteHtml('/not-found',{user}),404);
+  const queryPath=url.searchParams.get('path')??'',srcRes=await platform(env,`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/source?path=${encodeURIComponent(queryPath)}`),source=srcRes.ok?await readJson(srcRes):{};
+  const canManage=Boolean(user?.username&&user.username===repo.owner);let grants:any[]=[];if(canManage&&match?.[3]==='settings'){const grantResponse=await platform(env,`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/agents`,request);if(grantResponse.ok){const grantBody=await readJson(grantResponse);grants=grantBody?.grants??[]}}
+  const project=env.PROJECTS.get(env.PROJECTS.idFromName(repo.projectId));
+  const get=async(suffix:string)=>{try{const r=await project.fetch(new Request(`https://project.internal${suffix}`,{headers:{'x-project-id':repo.projectId,'x-actor':JSON.stringify({id:`public-${repo.id}`,projectId:repo.projectId,role:'contributor'})}}));return r.ok?await r.json() as any:null}catch{return null}};
+  const [context,views,events]=await Promise.all([get('/context'),get('/views'),get('/events?limit=100')]);
+  const changeIds=[...new Set<string>((events?.resource?.events??[]).filter((event:any)=>String(event.action).startsWith('change.')).map((event:any)=>event.resourceId).filter((id:any)=>typeof id==='string'))];
+  const changes=await Promise.all(changeIds.map(id=>get(`/changes/${encodeURIComponent(id)}`)));
+  const selected=candidateMatch?(url.searchParams.get('tab')??'Conversation'):match?.[3]?tabs[match[3]]:'Code';const candidateId=candidateMatch?.[3]??(selected==='Candidates'?url.searchParams.get('view'):null);
+  let candidate:any;
+  if(candidateId){const [view,checks,readiness,artifact]=await Promise.all([get(`/views/${encodeURIComponent(candidateId)}`),get(`/views/${encodeURIComponent(candidateId)}/checks`),get(`/views/${encodeURIComponent(candidateId)}/readiness`),get(`/views/${encodeURIComponent(candidateId)}/review-artifact`)]);candidate={...(view?.resource?.data??view?.resource??view??{}),id:candidateId,checks:checks?.resource??checks?.checks??checks?.items??[],readiness:readiness?.resource?.data??readiness?.resource??readiness,artifact:artifact?.resource?.data??artifact?.resource??artifact};}
+  const viewRows=views?.resource?.data??views?.resource??[];
+  const data={repository:repo,entries:source?.entries??[],file:source?.file,readme:source?.readme,candidates:Array.isArray(viewRows)?viewRows.map((item:any)=>({...item,...(item.data??{})})):[],candidate,selectedTab:selected,fixture:false,tasks:(context?.resource?.claims??[]).map((item:any)=>({...item,...(item.data??{}),title:item.data?.title??item.data?.description??item.id})),changes:changes.map((item:any)=>({...item?.resource,...(item?.resource?.data??{})})).filter(Boolean),project,origin:url.origin,canManage,grants};
+  return html(repositoryHtml(data));
+ }catch{return html(siteHtml('/not-found',{user}),503)}
+}

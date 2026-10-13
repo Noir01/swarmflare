@@ -1,0 +1,25 @@
+import { it, expect } from 'vitest';
+import { env } from 'cloudflare:workers';
+import worker from '../../apps/worker/src/index';
+import { WorkspaceClient } from '../../packages/client/index';
+const hex=(b:ArrayBuffer)=>Array.from(new Uint8Array(b),x=>x.toString(16).padStart(2,'0')).join('');
+it('two authenticated clients coordinate via real Worker and SQLite DO; spoofing and acceptance denied', async()=>{
+ const projectId='http-integration'; const tokens={alice:'local-test-alice',bob:'local-test-bob',human:'local-test-human'};
+ const credentials=await Promise.all(Object.entries(tokens).map(async([id,token])=>({id,projectId,role:id==='human'?'human':'contributor',tokenHash:hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))),expiresAt:Date.now()+60000})));
+ const bindings={...env,AUTH_CREDENTIALS:JSON.stringify(credentials)};
+ const fetcher:typeof fetch=async(input,init)=>worker.fetch(new Request(input,{...init,redirect:'manual'}),bindings);
+ const alice=new WorkspaceClient({baseUrl:'https://local',projectId,token:tokens.alice,fetch:fetcher});
+ const bob=new WorkspaceClient({baseUrl:'https://local',projectId,token:tokens.bob,fetch:fetcher});
+ await alice.createClaim({requestId:'claim-a',payload:{obligationIds:['legacy'],areas:['api']}});
+ await bob.createClaim({requestId:'claim-b',payload:{obligationIds:['legacy'],areas:['ui']}});
+ const decision=await alice.createDecision({requestId:'question',payload:{question:'Keep legacy array for old clients?',obligationIds:['legacy'],participants:['alice','bob']}}) as {id:string};
+ await alice.respondDecision(decision.id,{requestId:'answer-a',payload:{body:'Yes, opt-in object only',acknowledge:true}});
+ await bob.respondDecision(decision.id,{requestId:'answer-b',payload:{body:'UI agrees',acknowledge:true}});
+ await alice.agreeDecision(decision.id,{requestId:'agree-a',payload:{}});
+ await bob.agreeDecision(decision.id,{requestId:'agree-b',payload:{}});
+ const context=await bob.context();expect(context.claims).toHaveLength(2);expect(context.decisions[0].data.status).toBe('agreed');
+ const pages=[];for await(const page of alice.eventPages({limit:2,maxPages:10}))pages.push(page);expect(pages.length).toBeGreaterThan(1);
+ const denied=await fetcher(`https://local/api/v1/projects/${projectId}/acceptances`,{method:'POST',headers:{Authorization:'Bearer '+tokens.alice,'x-actor':JSON.stringify({id:'human',projectId,role:'human'})},body:'{}'});expect(denied.status).toBe(403);await denied.text();
+ const other=await fetcher('https://local/api/v1/projects/another/context',{headers:{Authorization:'Bearer '+tokens.alice}});expect(other.status).toBe(403);await other.text();
+ const none=await fetcher(`https://local/api/v1/projects/${projectId}/context`);expect(none.status).toBe(401);await none.text();
+});

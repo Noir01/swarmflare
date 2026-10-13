@@ -1,0 +1,22 @@
+{
+  "name": "shared-agent-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "test:git": "vitest run --config vitest.config.ts tests/git",
+    "test": "npm run test:unit && npm run test:worker"
+  },
+  "dependencies": {"zod": "4.6.5"},
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "wrangler": "4.145.0",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "vitest": "4.1.0",
+    "@types/node": "22.19.0",
+    "tsx": "4.20.6"
+  }
+}

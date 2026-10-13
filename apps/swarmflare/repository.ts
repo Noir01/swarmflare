@@ -1,0 +1,68 @@
+export type RepositoryPageModel = {
+  repository: { owner: string; name: string; description?: string; status?: string; [key: string]: unknown };
+  entries?: Array<{ name: string; kind?: string; path?: string }>;
+  file?: { path?: string; content?: string };
+  readme?: string;
+  candidates?: Array<Record<string, any>>;
+  candidate?: Record<string, any>;
+  selectedTab?: string;
+  fixture?: boolean;
+  tasks?: any[];
+  changes?: any[];
+  project?: any;
+  grants?: any[];
+  origin?: string;
+  canManage?: boolean;
+  [key: string]: unknown;
+};
+
+const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+const pathPart = (value: string) => encodeURIComponent(value);
+const statusLabel = (value: unknown) => esc(value || 'Status unavailable');
+
+export function repositoryHtml(model: RepositoryPageModel): string {
+  const { repository: repo } = model;
+  const base = `/${pathPart(repo.owner)}/${pathPart(repo.name)}`;
+  const candidate = model.candidate;
+  const candidateBase = candidate ? `${base}/candidates/${pathPart(String(candidate.id ?? ''))}` : `${base}/candidates`;
+  const candidateTab = model.selectedTab || 'Conversation';
+  const repoTabs = ['Code', 'Tasks', 'Changes', 'Candidates', 'Settings'];
+  const candidateTabs = ['Conversation', 'Files changed', 'Checks', 'Preview'];
+  const tabs = (items: string[], selected: string, hrefFor: (tab: string) => string) => `<nav class="tabs" aria-label="${candidate ? 'Candidate' : 'Repository'} navigation">${items.map(tab => `<a class="tab ${tab === selected ? 'active' : ''}" href="${esc(hrefFor(tab))}">${esc(tab)}</a>`).join('')}</nav>`;
+  const entries = model.entries ?? [];
+  const fileTable = entries.length ? `<div class="filebox"><table><thead><tr><th>Name</th><th>Type</th></tr></thead><tbody>${entries.map(entry => { const path=entry.path || entry.name; const href=`${base}?path=${encodeURIComponent(path)}`; return `<tr><td>${entry.kind==='directory'?'📁':'📄'} <a href="${esc(href)}">${esc(path)}</a></td><td>${esc(entry.kind || 'file')}</td></tr>`; }).join('')}</tbody></table></div>` : `<section class="empty"><strong>No files yet</strong><p>This repository has no readable source entries.</p></section>`;
+  const readme = model.readme ? `<section class="readme"><h2>README</h2><div class="readme-body">${esc(model.readme)}</div></section>` : `<section class="empty"><strong>No README available</strong><p>A README will appear here when repository content is available.</p></section>`;
+  const candidateList = (model.candidates ?? []).map(item => `<a class="candidate-link" href="${esc(`${base}/candidates/${pathPart(String(item.id ?? ''))}`)}"><strong>${esc(item.title || item.id || 'Untitled candidate')}</strong><span>${statusLabel(item.status)}</span></a>`).join('');
+  let primary: string;
+  let contextual = '';
+  if (candidate) {
+    const selected = candidateTab;
+    let content = '';
+    if (selected === 'Files changed') {
+      const artifact = candidate.artifact;
+      content = artifact ? `<section class="filebox"><div class="file-heading">${esc(artifact.path || 'Changed files')}</div>${Array.isArray(artifact.files)?artifact.files.map((file:any)=>`<details open><summary>${esc(file.path||'Changed file')}</summary><pre>${esc(file.diff||file.patch||file.content||'No diff content available.')}</pre></details>`).join(''): `<pre>${esc(artifact.diff||artifact.patch||artifact.content||'No diff content available.')}</pre>`}</section>` : `<section class="empty"><strong>No file changes available</strong><p>This candidate has no readable artifact data.</p></section>`;
+    } else if (selected === 'Checks') {
+      const checks = Array.isArray(candidate.checks) ? candidate.checks : [];
+      content = checks.length ? `<section class="filebox"><table><thead><tr><th>Check</th><th>Result</th></tr></thead><tbody>${checks.map((check: any) => `<tr><td>${esc(check.name || check.id || 'Check')}</td><td>${statusLabel(check.status || check.result)}</td></tr>`).join('')}</tbody></table></section>` : `<section class="empty"><strong>No checks recorded</strong><p>Check results are not available for this candidate.</p></section>`;
+    } else if (selected === 'Preview') {
+      content = `<section class="empty"><strong>Preview unavailable</strong><p>No preview artifact was provided for this candidate.</p></section>`;
+    } else {
+      content = `<section class="readme"><h2>Outcome</h2><div class="readme-body"><p>${esc(candidate.outcome||candidate.summary||candidate.description||'No outcome summary available.')}</p><p><strong>Constraints:</strong> ${esc(candidate.constraints||'No constraints summary available.')}</p><p><strong>Check status:</strong> ${esc(candidate.checkStatus||candidate.readiness?.status||'Unavailable')}</p><p><strong>Finding summary:</strong> ${esc(candidate.findingSummary||(Array.isArray(candidate.findings)?candidate.findings.map((f:any)=>f.message||f.title).join('; '):'')||'No findings summary available.')}</p></div></section>`;
+    }
+    primary = `${tabs(repoTabs, 'Candidates', tab => `${base}${tab === 'Code' ? '' : `/${tab.toLowerCase()}`}`)}<div class="candidate-title"><div><p class="eyebrow">Candidate</p><h1>${esc(candidate.title || candidate.id || 'Candidate')}</h1></div><span class="pill">${statusLabel(candidate.status)}</span></div>${tabs(candidateTabs, selected, tab => `${candidateBase}?tab=${encodeURIComponent(tab)}`)}${content}`;
+    const contract = candidate.contract;
+    const findings = Array.isArray(candidate.findings) ? candidate.findings : [];
+    contextual = `<aside><h2>Review context</h2>${candidate.readiness ? `<p>Readiness: <strong>${esc(candidate.readiness.status || (candidate.readiness.ready ? 'Ready' : 'Not ready'))}</strong></p>` : ''}${contract ? `<details><summary>Contract details</summary><pre>${esc(JSON.stringify(contract, null, 2))}</pre></details>` : ''}<h3>Findings</h3>${findings.length ? findings.map((f: any) => `<p>${esc(f.message || f.title || f)}</p>`).join('') : '<p class="muted">No findings recorded.</p>'}${candidate.view ? `<details><summary>Technical identifiers</summary><pre>${esc(JSON.stringify(candidate.view, null, 2))}</pre></details>` : ''}</aside>`;
+  } else {
+    const selected = model.selectedTab || 'Code';
+    const items = selected === 'Tasks' ? model.tasks : selected === 'Changes' ? model.changes : undefined;
+    const records = (items ?? []).map((item:any) => `<article class="candidate-link"><strong>${esc(item.title || item.name || item.id || 'Untitled')}</strong><span>${statusLabel(item.status || item.state)}</span><p>${esc(item.description || item.summary || item.context || item.message || '')}</p>${item.id ? `<details><summary>Technical details</summary><pre>${esc(JSON.stringify(item,null,2))}</pre></details>`:''}</article>`).join('');
+    const origin=String(model.origin||'');
+    const settings=`<section class="readme"><h2>Connect an agent</h2><div class="readme-body"><p>Share this prompt with your agent. It contains public links only, never a credential.</p><pre class="code">Read the Swarmflare agent guide at ${esc(origin)}/skills/swarmflare.md. Use the API at ${esc(origin)}/api/platform. Do not ask for or expose credentials. The repository owner must grant access separately.</pre><p><a href="${esc(origin)}/skills/swarmflare.md">Versioned agent skill</a> · <a href="${esc(origin)}/api/platform">API base</a></p><button type="button" class="copy-prompt">Copy prompt</button></div></section><section class="readme"><h2>Owner access grants</h2><div class="readme-body">${model.canManage?`<p>Only the repository owner can issue or revoke a scoped grant. The token is shown once.</p><form data-api="agent-grant" data-owner="${esc(repo.owner)}" data-name="${esc(repo.name)}"><label for="grant-role">Role</label><select id="grant-role" name="role"><option value="contributor">Contributor</option><option value="reviewer">Reviewer</option></select><label for="grant-expiry">Expires in</label><select id="grant-expiry" name="expiresInSeconds"><option value="900">15 minutes</option><option value="3600">1 hour</option></select><button>Issue repository grant</button><p role="status" aria-live="polite"></p></form><h3>Active grants</h3>${(model.grants??[]).map((g:any)=>`<div class="candidate-link"><span>${esc(g.role)} · expires ${esc(g.expiresAt)}</span><button type="button" class="revoke-grant" data-grant-id="${esc(g.id)}" data-owner="${esc(repo.owner)}" data-name="${esc(repo.name)}">Revoke</button></div>`).join('')||'<p>No active grants are listed.</p>'}`:'<p>Sign in as the repository owner to manage agent access. Grants are repository-scoped and never included in the public prompt.</p>'}</div></section>`;
+    let body = selected === 'Candidates' ? (candidateList ? `<div class="candidate-list">${candidateList}</div>` : `<section class="empty"><strong>No candidates yet</strong><p>Candidate work will appear here when available.</p></section>`) : selected === 'Code' ? `${fileTable}${model.file ? `<section class="filebox"><div class="file-heading">${esc(model.file.path)}</div><pre>${esc(model.file.content)}</pre></section>`:''}${readme}` : selected === 'Tasks' || selected === 'Changes' ? records || `<section class="empty"><strong>No ${esc(selected.toLowerCase())} recorded</strong><p>There is no ${esc(selected.toLowerCase())} data for this repository.</p></section>` : selected === 'Settings' ? settings : `<section class="empty"><strong>${esc(selected)} is not available</strong><p>No ${esc(selected.toLowerCase())} data was supplied for this repository.</p></section>`;
+    primary = `${tabs(repoTabs, selected, tab => `${base}${tab === 'Code' ? '' : `/${tab.toLowerCase()}`}`)}${body}`;
+  }
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(repo.owner)}/${esc(repo.name)} · Swarmflare</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f6f8fa;color:#1f2328;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:inherit;text-decoration:none}.synthetic{background:#fff8c5;border-bottom:1px solid #d4a72c;text-align:center;padding:7px 16px;color:#6e4b00;font-size:12px}.shell{max-width:1200px;margin:0 auto;padding:24px 28px}.repo-head{border-bottom:1px solid #d1d9e0;padding-bottom:20px}.crumb{color:#57606a;margin-bottom:9px}.crumb strong{color:#0969da;font-weight:600}.repo-title{display:flex;align-items:center;gap:10px}.repo-title h1{font-size:24px;font-weight:600;margin:0}.badge,.pill{border:1px solid #d1d9e0;border-radius:2em;padding:2px 9px;color:#57606a;font-size:12px}.description{color:#59636e;margin:8px 0 0}.layout{display:grid;grid-template-columns:minmax(0,1fr) 270px;gap:24px;margin-top:18px}.layout.no-side{grid-template-columns:minmax(0,1fr)}.tabs{display:flex;gap:8px;border-bottom:1px solid #d1d9e0;overflow:auto;margin-bottom:18px}.tab{white-space:nowrap;padding:8px 12px 10px;color:#59636e;border-bottom:2px solid transparent}.tab.active{font-weight:600;color:#1f2328;border-bottom-color:#0969da}.filebox,.readme,.empty,aside{background:#fff;border:1px solid #d1d9e0;border-radius:6px;margin-bottom:16px}.filebox table{width:100%;border-collapse:collapse}.filebox th,.filebox td{text-align:left;padding:10px 14px;border-bottom:1px solid #d8dee4}.filebox th{background:#f6f8fa;color:#59636e;font-weight:500}.filebox tr:last-child td{border-bottom:0}.readme h2{font-size:16px;margin:0;padding:12px 16px;border-bottom:1px solid #d1d9e0}.readme-body{white-space:pre-wrap;padding:18px 20px;font-family:inherit}.empty{padding:20px;color:#59636e}.empty strong{color:#1f2328}.empty p{margin:5px 0 0}.candidate-title{display:flex;align-items:center;justify-content:space-between;margin:8px 0 18px}.candidate-title h1{font-size:22px;margin:0}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#59636e;margin:0 0 4px}.file-heading{padding:9px 14px;background:#f6f8fa;border-bottom:1px solid #d1d9e0;font-weight:600}.filebox pre,aside pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;margin:0;font:12px/1.6 ui-monospace,SFMono-Regular,monospace}aside{padding:16px;height:max-content}aside h2{font-size:16px;margin:0 0 12px}aside h3{font-size:13px;margin:20px 0 6px}.muted{color:#59636e}.candidate-list{border:1px solid #d1d9e0;background:#fff;border-radius:6px}.candidate-link{display:flex;justify-content:space-between;padding:13px 16px;border-bottom:1px solid #d8dee4;color:#0969da}.candidate-link:last-child{border-bottom:0}details{border-top:1px solid #d8dee4;margin-top:12px;padding-top:10px}summary{cursor:pointer;color:#0969da}@media(max-width:760px){.shell{padding:18px 14px}.layout{grid-template-columns:1fr}.repo-title h1{font-size:20px}}
+</style></head><body><header class="repo-head"><div class="crumb"><a href="/">Swarmflare</a> · <a href="/repositories">Repositories</a> · <a href="/how-it-works">How it works</a> / <strong>${esc(repo.owner)} / ${esc(repo.name)}</strong> <span class="badge">Public</span></div></header>${model.fixture===true?'<div class="synthetic">Synthetic local UI fixture — illustrative content only; not live repository or review data.</div>':''}<div class="shell"><header class="repo-head"><div class="crumb"><strong>${esc(repo.owner)} / ${esc(repo.name)}</strong></div><div class="repo-title"><h1>${esc(repo.name)}</h1><span class="badge">${statusLabel(repo.status)}</span></div><p class="description">${esc(repo.description || 'No repository description.')}</p></header><div class="layout ${contextual ? '' : 'no-side'}"><main>${primary}</main>${contextual}</div></div><script src="/assets/swarmflare.js" defer></script></body></html>`;
+}

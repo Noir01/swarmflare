@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "git-collaboration-demo-c29",
+  "main": "apps/worker/src/demo-index.ts",
+  "account_id": "cb50a73b7487ae7039cbc8b613986b8b",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "PROJECTS", "class_name": "Project" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Project"] }],
+  "artifacts": [
+    { "binding": "ARTIFACTS", "namespace": "git-collaboration-demo-c29", "remote": false }
+  ],
+  "limits": { "cpu_ms": 100 },
+  "vars": {}
+}

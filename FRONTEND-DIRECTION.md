@@ -1,0 +1,23 @@
+# Swarmflare frontend direction — user-approved scope
+
+Latest user direction supersedes the diagnostic dashboard UX and Astra-led frontend advice. Frontend/product UX advisor: 6.1 Sol; Luna can implement bounded disjoint assignments. Do not start old Astra frontend coordination. Product name: Swarmflare (working name; no naming exercise blocks delivery).
+
+## Experience
+
+Use familiar GitHub/GitLab information architecture, not GitHub trademarks/assets or a pixel clone: repository header, Code/file browser/README, Tasks, Changes, Candidates, Settings. Candidate review is PR-like Conversation/Files changed/Checks/Preview; raw IDs, hashes and receipts hidden under technical details. Landing page explains differences from vanilla GitHub with a concrete collaboration example, inspired by the previously shared Gittifacts project. Top-level How it works supplies instructions and tutorial.
+
+Real account signup/login with email/password/username, secure password hashing/session cookies, logout and basic unique identities. Email verification, password recovery and comprehensive abuse/rate-limit features can be deferred for bounded PoC. Preserve authorization and secret handling. Public-readable repositories with owner-only administrative writes initially; no sensitive demo data. Agent contributions explicitly delegated by repository owner using scoped credentials; ownership is authenticated platform identity, not Git commit author/email. Ordinary visitors must not mint tokens, mutate repository content/policy or approve results. Human acceptance stays human-only.
+
+Repo creation backed by actual Artifacts repositories, empty or initialized README. Add import of existing public HTTPS Git repositories if native Artifacts import is available and compatibility verified. Validate URLs/bound supported inputs and report asynchronous import progress/failure; do not promise arbitrary private-provider auth, LFS, submodule hydration, SSH/local URLs, arbitrary-host egress, or universal large-repo handling. Public import is a practical scoped target, not assumed done or trivial. Preserve existing seeded/repaired cloud demo and Artifacts resources. Existing fixed actor credentials need real per-user/repo ownership mapping before claiming multitenant readiness.
+
+Connect an agent: copyable prompt linking a first-party HTTPS skill document explaining the product and API/CLI workflow. Public skill contains no user secrets or broad cloud tokens. Scope credentials separately via owner-authorized issuance; never put them in public skill/URLs. Serve static guide from same Worker unless a separate Worker is actually needed. Version and make source readable. Do not claim downloading a skill automatically runs trusted instructions. Agents can contribute/review, never human-accept.
+
+DO-hosted Launch Agents/swarm harness is explicitly deferred due time, though it remains an interesting future direction. Do not render a fake functional launch control. Retain DO-backed coordination and real existing Artifacts source transport. No auto-merge lanes/rollouts/new VCS scope.
+
+## Current backend truth
+
+packages/artifacts-source/index.ts publishes verified Git packs to immutable source refs and fetches exact ref/commit/tree for readback. Real cloud source lifecycle exercised historically. This is not currently a general-purpose authenticated git-push hosting gateway. Git hashes prove object identity, not person/ownership/correctness. Platform identity/repo grants must enforce owner/delegated-agent access, with cloud write tokens internal/short-lived; Git author email cannot authorize writes. Required backend additions: account auth, ownership/catalog and per-repo Artifacts mapping, safe create/import endpoints, read-only public source navigation, scoped agent credentials and UI integration.
+
+## Delivery gates
+
+Design/review IA and one representative repository/candidate journey before parallel frontend breadth; then build real end-to-end paths with bounded model processes and existing pause/cgroup support. Test signup/login/logout, outsider write refusal, owner/delegate scope, real repo create/import and file readback, candidate feedback and unchanged human-only acceptance. Independently inspect screenshots and interact with product rather than equating passing API tests with comprehension. Preserve demo budget/account restrictions and current private credentials; publication/submission remain separately reserved. New host WSL /home/aniruddh; see HOST-MIGRATION.md for runtime caveats. Do not require user acceptance of confusing old dashboard to unblock this approved redesign.

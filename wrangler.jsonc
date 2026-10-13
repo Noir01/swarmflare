@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "git-collaboration-local",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {"bindings": [{"name": "PROJECTS", "class_name": "Project"}, {"name": "PLATFORM", "class_name": "Platform"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["Project"]}, {"tag": "v2", "new_sqlite_classes": ["Platform"]}]
+}

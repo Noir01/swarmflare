@@ -1,0 +1,5 @@
+# Provenance
+
+This adapter is original local code. It does not copy or import upstream Gittifacts domain modules. The structural repository-capability/token lifecycle and Git-over-HTTPS transport boundary were informed by read-only inspection of `https://github.com/JoviDeCroock/gittifacts` at commit `5f06eb4a5e425fdc4796774e3bd4284a0056288b` (MIT, Copyright (c) 2026 Jovi De Croock). The adjacent LICENSE retains that upstream MIT notice for provenance. Git protocol helpers are imported from this project's `packages/git-transport`; that sibling package separately records any source reuse and adaptations.
+
+Artifacts binding method signatures were checked against Wrangler's checked-in generated declarations and the official Cloudflare Workers-binding and Git-protocol documentation. No remote service was contacted.

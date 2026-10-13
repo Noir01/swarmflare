@@ -1,0 +1,66 @@
+import { it, expect, beforeEach } from 'vitest';
+import { env } from 'cloudflare:test';
+import { jobResourceSchema } from '../../packages/contracts/source';
+
+const human={id:'human',projectId:'proj',role:'human'};
+const contributor={id:'alice',projectId:'proj',role:'contributor'};
+const runner={id:'runner',projectId:'proj',role:'runner'};
+const request=(path:string,method='GET',body?:unknown,who=contributor)=>new Request(`https://internal${path}`,{method,headers:{'x-actor':JSON.stringify(who),'x-project-id':'proj',...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+const envelope=(requestId:string,payload:unknown,expectedVersion?:number)=>({requestId,...(expectedVersion===undefined?{}:{expectedVersion}),payload});
+let projectName=''; beforeEach(()=>{projectName=crypto.randomUUID();});
+const stub=()=>env.PROJECTS.get(env.PROJECTS.idFromName(projectName));
+const oid=(digit:string)=>digit.repeat(40);
+
+it('routes persistent source lifecycle endpoints and enforces actor roles',async()=>{
+ const s=stub();
+ const proposal=await s.fetch(request('/contracts/proposals','POST',envelope('proposal',{outcome:'baseline',constraints:[],obligations:[{id:'o1',description:'seed',acceptanceExamples:[]}],requiredCheckIds:['check'],unresolvedQuestions:[]}),contributor));
+ expect(proposal.status).toBe(201);
+ const proposalId=(await proposal.json() as any).resource.id;
+ const approved=await s.fetch(request(`/contracts/${proposalId}/approve`,'POST',envelope('approve',{},0),human));
+ expect(approved.status).toBe(201);
+ const initial=await s.fetch(request('/baseline/initialize','POST',envelope('seed', {commitOid:oid('a'),treeOid:oid('b')},0),human));
+ expect(initial.status).toBe(201);
+ const job=(await initial.json() as any).resource;
+ expect(job.data.input.kind).toBe('seed');
+ const denied=await s.fetch(request('/runner/claim','POST',envelope('claim',{leaseSeconds:30})));
+ expect(denied.status).toBe(403);
+ const claimed=await s.fetch(request('/runner/claim','POST',envelope('claim',{leaseSeconds:30}),runner));
+ expect(claimed.status).toBe(201);
+ const claimedJob=(await claimed.json() as any).resource;
+ expect(claimedJob.data.status).toBe('leased');
+ const complete=await s.fetch(request(`/runner/jobs/${claimedJob.id}/complete`,'POST',envelope('complete',{attemptId:claimedJob.data.attemptId,ok:true,receipt:{backend:'local-git',commitOid:oid('a'),treeOid:oid('b'),ref:`refs/agent/seeds/${job.data.input.seedId}`}}),runner));
+ expect(complete.status).toBe(201);
+ const baseline=await s.fetch(request('/baseline'));
+ expect((await baseline.json() as any).resource).toMatchObject({version:1,commitOid:oid('a'),treeOid:oid('b')});
+ const created=await s.fetch(request('/changes','POST',envelope('change',{title:'First change',obligationIds:['o1']})));
+ expect(created.status).toBe(201);
+ const change=(await created.json() as any).resource;
+ const reserved=await s.fetch(request(`/changes/${change.id}/revisions`,'POST',envelope('revision',{baseCommitOid:oid('a'),commitOid:oid('c'),treeOid:oid('d'),obligationIds:['o1'],decisionRevisions:[],dependencies:[]})));
+ expect(reserved.status).toBe(201);
+ const revisionJob=(await reserved.json() as any).resource;
+ expect(revisionJob.data.status).toBe('reserved');
+ const leased=await s.fetch(request('/runner/claim','POST',envelope('claim-revision',{leaseSeconds:30}),runner));
+ const lease=(await leased.json() as any).resource;
+ expect(lease.id).toBe(revisionJob.data.jobId);
+ const revisionComplete=await s.fetch(request(`/runner/jobs/${lease.id}/complete`,'POST',envelope('complete-revision',{attemptId:lease.data.attemptId,ok:true,receipt:{backend:'local-git',commitOid:oid('c'),treeOid:oid('d'),ref:`refs/agent/revisions/${change.id}/${revisionJob.id}`}}),runner));
+ expect(revisionComplete.status).toBe(201);
+ const updated=await s.fetch(request(`/changes/${change.id}`));
+ expect((await updated.json() as any).resource.data).toMatchObject({latestRevisionId:revisionJob.id,revisions:[{status:'published',receipt:{commitOid:oid('c'),treeOid:oid('d')}}]});
+ const viewResponse=await s.fetch(request('/views','POST',envelope('view',{baseVersion:1,baseCommitOid:oid('a'),contractVersion:1,policyVersion:1,orderedRevisions:[{changeId:change.id,revisionId:revisionJob.id}],excludedChangeIds:[],decisionRevisions:[],compositionVersion:1})));
+ expect(viewResponse.status).toBe(201);
+ const view=(await viewResponse.json() as any).resource;
+ const jobResponse=await s.fetch(request('/runner/jobs/'+view.data.jobId,'GET',undefined,runner));
+ const compositionJob=jobResourceSchema.parse((await jobResponse.json() as any).resource);
+ expect(compositionJob.data.input).toMatchObject({kind:'composition',revisions:[{changeId:change.id,revisionId:revisionJob.id,owner:'alice',baseCommitOid:oid('a'),commitOid:oid('c'),treeOid:oid('d'),obligationIds:['o1'],decisionRevisions:[],dependencies:[]}]});
+ const viewLease=jobResourceSchema.parse((await (await s.fetch(request('/runner/claim','POST',envelope('claim-view',{leaseSeconds:30}),runner))).json() as any).resource);
+ const completedView=await s.fetch(request(`/runner/jobs/${view.data.jobId}/complete`,'POST',envelope('complete-view',{attemptId:viewLease.data.attemptId,ok:true,receipt:{backend:'local-git',commitOid:oid('e'),treeOid:oid('f'),ref:`refs/agent/views/${view.id}`}}),runner));
+ expect(completedView.status).toBe(201);
+ const runnable=await s.fetch(request(`/views/${view.id}`));
+ expect((await runnable.json() as any).resource.data.status).toBe('runnable');
+});
+
+it('does not allow public source route fallthrough for malformed paths',async()=>{
+ const s=stub();
+ const response=await s.fetch(request('/views/id/unknown','POST',envelope('x',{})));
+ expect(response.status).toBe(404);
+});

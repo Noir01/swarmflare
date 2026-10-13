@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+.env
+.env.*
+.dev.vars*
+.execution/
+.worktrees/
+.local/
+coverage/
+dist/
+reports/workers/*.log
+*.tsbuildinfo
