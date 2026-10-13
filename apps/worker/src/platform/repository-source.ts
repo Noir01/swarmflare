@@ -91,13 +91,21 @@ async function withInitialToken<T>(repo: Repo, secret: string, fn: (token: strin
   return result as T;
 }
 function remoteFor(remote: string, token: string): GitRemote { return { url: checkedRemote(remote), auth: { bearer: token }, timeoutMs: 10_000, maxResponseBytes: 32 * 1024 * 1024 }; }
-async function githubImportAllowed(url: string): Promise<boolean> {
-  if (url !== IMPORT_URL) return false;
+type GitHubImportCheck = "allowed" | "unavailable" | "denied";
+async function githubImportAllowed(url: string): Promise<GitHubImportCheck> {
+  if (url !== IMPORT_URL) return "denied";
   try {
     const r = await fetch("https://api.github.com/repos/octocat/Hello-World", { headers: { accept: "application/vnd.github+json", "user-agent": "Swarmflare" }, redirect: "manual", signal: AbortSignal.timeout(5000) });
-    if (!r.ok || r.status >= 300) return false;
+    if ([403, 429].includes(r.status) || r.status >= 500) return "unavailable";
+    if (!r.ok || r.status >= 300) return "denied";
     const value = await r.json() as { full_name?: unknown; private?: unknown; size?: unknown };
-    return value.full_name === "octocat/Hello-World" && value.private === false && typeof value.size === "number" && value.size >= 0 && value.size <= 1024;
+    return value.full_name === "octocat/Hello-World" && value.private === false && typeof value.size === "number" && value.size >= 0 && value.size <= 1024 ? "allowed" : "denied";
+  } catch { return "unavailable"; }
+}
+async function githubGitFallbackAllowed(): Promise<boolean> {
+  try {
+    const refs = await listRefs({ url: "https://github.com/octocat/Hello-World.git", timeoutMs: 5000, maxResponseBytes: 64 * 1024 }, { protocol: 2, prefixes: ["refs/heads/master"] });
+    return refs.has("refs/heads/master");
   } catch { return false; }
 }
 async function sourceTuple(repo: Repo, ref: string): Promise<{ commitOid: string | null; treeOid: string | null }> {
@@ -130,7 +138,9 @@ async function sourceTuple(repo: Repo, ref: string): Promise<{ commitOid: string
 export async function provisionRepository(binding: PlatformArtifactsBinding | undefined, input: { artifactsName: string; name: string; description: string; initializeReadme: boolean; importUrl?: string }): Promise<ProvisionedSource> {
   if (!binding || !validRepoName(input.artifactsName) || typeof input.name !== "string" || typeof input.description !== "string" || input.description.length > 500) throw safeError();
   if (input.importUrl !== undefined) {
-    if (!await githubImportAllowed(input.importUrl)) throw new Error("IMPORT_NOT_ALLOWED");
+    const check = await githubImportAllowed(input.importUrl);
+    if (check === "denied") throw new Error("IMPORT_NOT_ALLOWED");
+    if (check === "unavailable" && !await githubGitFallbackAllowed()) throw new Error("IMPORT_SOURCE_UNAVAILABLE");
     let created: { name: string; remote: string; defaultBranch: string; token: string };
       try { created = await bounded(binding.import({ source: { url: IMPORT_URL, depth: 1 }, target: { name: input.artifactsName, opts: { description: input.description, readOnly: false } } })); } catch { throw safeError(); }
     let remote: string;

@@ -113,6 +113,39 @@ describe("repository source provisioning", () => {
     expect(artifacts.import).not.toHaveBeenCalled();
   });
 
+  it("uses only the bounded anonymous Git preflight when GitHub metadata is unavailable", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const oid = "a".repeat(40);
+    const pkt = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input); calls.push({ url, init });
+      if (url.includes("api.github.com")) return new Response("rate limited", { status: 403 });
+      if (url === "https://github.com/octocat/Hello-World.git/info/refs?service=git-upload-pack") return new Response(pkt("version 2\n") + pkt("ls-refs=unborn\n") + "0000", { headers: { "Content-Type": "application/x-git-upload-pack-advertisement" } });
+      if (url === "https://github.com/octocat/Hello-World.git/git-upload-pack") return new Response(pkt(`${oid} refs/heads/master\n`) + "0000", { headers: { "Content-Type": "application/x-git-upload-pack-result" } });
+      throw new Error("unexpected URL");
+    });
+    const importMock = vi.fn(async () => { throw new Error("provider import fixture stop"); });
+    const artifacts = { ...binding("https://acct.artifacts.cloudflare.net/git/default/repo.git"), import: importMock };
+    await expect(provisionRepository(artifacts, { artifactsName: "sf-import", name: "x", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/Hello-World" })).rejects.toThrow("SOURCE_UNAVAILABLE");
+    expect(importMock).toHaveBeenCalledWith({ source: { url: "https://github.com/octocat/Hello-World", depth: 1 }, target: { name: "sf-import", opts: { description: "", readOnly: false } } });
+    const gitCalls = calls.filter(call => new URL(call.url).hostname === "github.com");
+    expect(gitCalls).toHaveLength(2);
+    for (const call of gitCalls) {
+      expect(new Headers(call.init?.headers).has("authorization")).toBe(false);
+      expect(call.init?.redirect).toBe("manual");
+      expect(new Headers(call.init?.headers).get("git-protocol")).toBe("version=2");
+    }
+  });
+
+  it("does not use Git fallback for metadata-confirmed private repositories", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ full_name: "octocat/Hello-World", private: true, size: 1 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const importMock = vi.fn();
+    await expect(provisionRepository({ ...binding("https://acct.artifacts.cloudflare.net/git/default/repo.git"), import: importMock }, { artifactsName: "sf-import", name: "x", description: "", initializeReadme: false, importUrl: "https://github.com/octocat/Hello-World" })).rejects.toThrow("IMPORT_NOT_ALLOWED");
+    expect(importMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("imports the approved public repository and reaches ready only after actual smart-HTTP object readback", async () => {
     scratch = await mkdtemp(join(tmpdir(), "swarmflare-import-")); await mkdir(join(scratch, "home"));
     const { remote, bare } = await localGitHttp();

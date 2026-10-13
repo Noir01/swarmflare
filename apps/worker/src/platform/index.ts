@@ -13,6 +13,7 @@ const cookie = (token: string, age: number) => `${cookieName}=${token}; Path=/; 
 const signupSchema = z.object({ username: z.string().regex(/^[a-z0-9-]{3,32}$/i).transform(v => v.toLowerCase()), email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), password: z.string().min(8).max(128) }).strict();
 const loginSchema = z.object({ login: z.string().trim().min(1).max(254), password: z.string().min(1).max(128) }).strict();
 const repoSchema = z.object({ name: z.string().regex(/^[a-z0-9-]{3,64}$/i).transform(v => v.toLowerCase()), description: z.string().max(500).optional(), initializeReadme: z.boolean().optional(), importUrl: z.string().max(512).optional() }).strict();
+const importRetrySchema = z.object({ importUrl: z.string().min(1).max(512) }).strict();
 const grantSchema = z.object({ role: z.enum(['contributor', 'reviewer']), expiresInSeconds: z.number().int().min(60).max(3600) }).strict();
 const safeSource = (s: ProvisionedSource) => ({ ref: s.ref, commitOid: s.commitOid, treeOid: s.treeOid });
 
@@ -64,7 +65,7 @@ export class Platform extends DurableObject<Env> {
       const source = await provisionRepository(this.env.ARTIFACTS, { artifactsName: row.artifacts, name: row.name, description: row.description, initializeReadme: input.initializeReadme, ...(input.importUrl ? { importUrl: input.importUrl } : {}) });
       this.ctx.storage.sql.exec('UPDATE repos SET status=?,source=?,error=NULL WHERE id=?', source.status, JSON.stringify(source), row.id);
     } catch (error) {
-      const code = error instanceof Error && ['IMPORT_NOT_ALLOWED', 'SOURCE_TOKEN_CLEANUP_FAILED'].includes(error.message) ? error.message : 'SOURCE_UNAVAILABLE';
+      const code = error instanceof Error && ['IMPORT_NOT_ALLOWED', 'IMPORT_SOURCE_UNAVAILABLE', 'SOURCE_TOKEN_CLEANUP_FAILED'].includes(error.message) ? error.message : 'SOURCE_UNAVAILABLE';
       this.ctx.storage.sql.exec("UPDATE repos SET status='failed',error=? WHERE id=?", code, row.id);
     }
     return this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE id=?', row.id)!;
@@ -89,7 +90,7 @@ export class Platform extends DurableObject<Env> {
       if (path === '/auth/logout' && method === 'POST') { const s = await this.session(request); if (s && !this.writeAllowed(request, s)) return fail('CSRF', 'CSRF token invalid', 403); if (s) this.ctx.storage.sql.exec('DELETE FROM sessions WHERE token=?', await sha256(s.token)); return json({ ok: true }, 200, { 'Set-Cookie': cookie('', 0) }); }
       if (path === '/internal/authorize-project' && method === 'POST') return this.authorizeProject(request);
       const session = await this.session(request);
-      const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh)(?:\/([^/]+))?)?$/);
+      const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh|retry)(?:\/([^/]+))?)?$/);
       if (path === '/repos' && method === 'GET') return json({ repositories: this.rows<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos ORDER BY created DESC').map(row => this.repo(row)) });
       if (path === '/repos' && method === 'POST') {
         if (!this.writeAllowed(request, session)) return fail('FORBIDDEN', 'Authenticated owner session required', 403);
@@ -104,6 +105,13 @@ export class Platform extends DurableObject<Env> {
         const row = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE owner=? AND name=?', owner!, name!);
         if (!row) return fail('NOT_FOUND', 'Repository not found', 404);
         if (!action && method === 'GET') return json({ repository: this.repo(row) });
+        if (action === 'retry' && method === 'POST') {
+          if (!this.writeAllowed(request, session) || session!.user.id !== row.ownerId) return fail('FORBIDDEN', 'Repository owner required', 403);
+          if (row.status !== 'failed' || row.source !== null || !['IMPORT_NOT_ALLOWED', 'IMPORT_SOURCE_UNAVAILABLE'].includes(row.error ?? '')) return fail('INVALID_STATE', 'Repository is not eligible for import retry', 409);
+          const input = this.parsed(importRetrySchema, await this.body(request)); if (!input) return fail('INVALID_REQUEST', 'Invalid import retry details', 400);
+          const retried = await this.provision(row, { initializeReadme: false, importUrl: input.importUrl });
+          return json({ repository: this.repo(retried) });
+        }
         if (action === 'source' && method === 'GET') {
           const stored = this.sourceFrom(row); if (row.status !== 'ready' || !stored) return fail('SOURCE_NOT_READY', 'Repository source is not ready', 409);
           try { return json(await readRepositorySource(this.env.ARTIFACTS, stored, url.searchParams.get('path') ?? '')); } catch (error) { return fail(error instanceof Error && error.message === 'SOURCE_PATH_NOT_FOUND' ? 'NOT_FOUND' : 'SOURCE_UNAVAILABLE', 'Repository source unavailable', error instanceof Error && error.message === 'SOURCE_PATH_NOT_FOUND' ? 404 : 503); }
