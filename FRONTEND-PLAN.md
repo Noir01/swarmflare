@@ -1,11 +1,15 @@
-# Swarmflare implementation plan — Sol / continuous39
+# Swarmflare implementation plan — Sol / continuous41
 
-## Current integration/deployment tranche
+Current milestone: signed development source, gated Actions deploy, native accounts/README creation/public import/scoped grants and actual deployed Code/README browsing are exercised. Import recovery retains repository/project identity, explicitly selects initial master only before source identity is assigned, and never changes a pinned ready tuple. Supported full regression: 344 unit/local and 107 Worker tests passed. Candidate Conversation/Files changed/Checks/Preview renderer navigation remains independently fixture-qualified; a newly imported repository honestly has no candidates.
+
+Next executable tranche is integrated account-owned task approval/baseline/per-repository source-runner mapping and candidate feedback, not more visual breadth. Sol owns shared contracts and integration; explicit bounded Luna implementations must be disjoint across backend scope/runner configuration and human review controls. Test synthetic actors locally, but never use real human credentials or approve/accept the retained cloud result. Maintain immutable refs, exact readbacks, evidence freshness and independent-review policy. Completion is not claimed from source import or deployment alone.
+
+## Historical integration/deployment tranche — continuous39
 Actual development HEAD 176d1ca is already signed/pushed and independently verified through GitHub. Previous local account/Git-backed/browser work exists; STATUS/NEXT historical human pause is superseded. Current GITHUB-HANDOFF authorizes GitHub Actions using the dedicated existing secret, not native Workers Builds (user ruled that out). No new credential request or account connection.
 
 This tranche: bounded Luna source cleanup/provider compatibility and Actions workflow/build contract work; Sol independently verifies changes, signs/pushes coherent development milestones, reads exact Actions/deployment results and exercises native account-owned create/import/source with short-lived synthetic test identities. Preserve existing Project DO/source/candidate and all private deployment secrets, use --keep-vars, retain bounded expiry and CPU100ms. The public catalog must be explicitly empty/unavailable when nothing is provisioned; no synthetic records deployed. Human task approval/final acceptance stays reserved. Dynamic per-repo runner/source integration remains a separate foundation, not inferred from repository creation.
 
-## Current executable tranche
+## Historical local implementation tranche — continuous38
 Fresh inspection on WSL: development at 5f1e62f; account-to-project router imported but absent, account test uses invalid short password, source module has no exercised import lifecycle, candidate renderer misreads real review-artifact/check resources. Historical STATUS/NEXT human pause does not govern redesign. Deadline from current continuous38 metadata; execution controls remain read-only.
 
 Independent representative gate passed this window: serial Chromium navigation Code -> Candidates -> Files changed -> Checks, two tests passed; coordinator inspected both actual screenshots. Familiar light repository layout, honest fixture banner and progressive details are retained. This is a renderer gate, not backend acceptance.
