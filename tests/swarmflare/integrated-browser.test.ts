@@ -173,7 +173,7 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   expect((await runSourceJob(runner,{remote:localBare,workspaceRoot:work,resolveRepository:()=>sourceWork,requestId:'mapped-composition',sourceBackend:'artifacts-git'}))?.data.status).toBe('completed');
   const view=await contributor.view(created.id);expect(git('-C',bare,'rev-parse',view.data.receipt!.ref)).toBe(view.data.receipt!.commitOid);
   await verifyViewSource(runner,{remote:localBare,viewId:view.id,requestId:'mapped-source-verification'});
-  const checks=await runViewMandatoryDemoSuite(runner,{remote:localBare,workspaceRoot:work,viewId:view.id,projectId:repo.projectId,requestId:'mapped-mandatory'});expect(checks.map(c=>c.data.result)).toEqual(['passed','passed']);
+  const checks=await runViewMandatoryDemoSuite(runner,{remote:localBare,workspaceRoot:work,viewId:view.id,projectId:repo.projectId,requestId:'mapped-mandatory'});expect(checks.map(c=>c.data.result),JSON.stringify(checks.map(c=>c.data))).toEqual(['passed','passed']);
   const artifact=await buildReviewArtifact(runner,{remote:localBare,workspaceRoot:work,viewId:view.id});expect(artifact.data.diff.files).toContain('demo/seed/index.ts');
   expect((await contributor.readiness(view.id)).ready).toBe(false);
   await navigate('/browser-owner/browser-repo/candidates/'+view.id);
@@ -183,6 +183,67 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   expect(await contributor.baseline()).toEqual(baseline.resource);expect((await contributor.readiness(view.id)).ready).toBe(false);
   const candidateCapture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);await mkdir(resolve('reports/evaluation/continuous43-integrated'),{recursive:true});await writeFile(resolve('reports/evaluation/continuous43-integrated/candidate.png'),Buffer.from(candidateCapture.data,'base64'));
   await writeFile(resolve('reports/evaluation/continuous43-integrated/journey.json'),JSON.stringify({provenance:'Actual local SQLite account ownership and scoped runner session, real Git publication/composition/readback, actually executed mandatory API/UI suites on prepared FIRST-PARTY trusted fixture (not imported source), persisted browser request-changes. Native provider/token/HTTPS mapping synthetic. No cloud or real human acceptance.',projectId:repo.projectId,viewId:view.id,source:view.data.receipt,policyDigest:policy.resource.data.checkSuiteDigest,checks:checks.map(c=>({id:c.data.checkId,result:c.data.result})),finding:findings[0],baselineUnchanged:true,ready:false},null,2));
+
+  // Repair is a new exact revision by the assigned owner; review and finding
+  // resolution use a distinct, owner-issued synthetic reviewer actor.
+  const reviewerToken=await evaluate(`fetch('/api/platform/auth/session').then(r=>r.json()).then(s=>fetch('/api/platform/repos/browser-owner/browser-repo/agents',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify({role:'reviewer',expiresInSeconds:600})})).then(r=>r.json()).then(x=>x.token)`);
+  expect(typeof reviewerToken).toBe('string');
+  const reviewer=new WorkspaceClient({baseUrl:origin,projectId:repo.projectId,token:reviewerToken,maxRequests:60,deadline:90000});
+  const reviewerNonce=await reviewer.context(); expect(reviewerNonce).toBeTruthy();
+  const originalView=await contributor.view(view.id),originalChecks=await contributor.checks(view.id),originalFinding=await contributor.finding(findings[0]!.id),originalBaseline=await contributor.baseline();
+  const originalCommit=originalView.data.receipt!.commitOid,originalTree=originalView.data.receipt!.treeOid,originalRef=originalView.data.receipt!.ref;
+  const reviewerGrantDenied=await contributor.reviewView(view.id,{requestId:crypto.randomUUID(),payload:{viewId:view.id,manifestDigest:originalView.data.manifestDigest!,composedCommitOid:originalCommit,treeOid:originalTree,contractVersion:1,policyVersion:policy.resource.version,checkSuiteDigest:policy.resource.data.checkSuiteDigest,obligationIds:envelope.payload.obligationIds,summary:'Contributor must not review own change.',verdict:'failed',findings:[findings[0]!.id]}}).catch((e:any)=>e);expect(reviewerGrantDenied).toMatchObject({status:403});
+  expect(git('-C',bare,'show',originalCommit+':README.md')).not.toContain('Pagination behavior');
+  expect(artifact.data.diff.files).toContain('demo/seed/index.ts');
+  await reviewer.reviewView(view.id,{requestId:crypto.randomUUID(),payload:{viewId:view.id,manifestDigest:originalView.data.manifestDigest!,composedCommitOid:originalCommit,treeOid:originalTree,contractVersion:1,policyVersion:policy.resource.version,checkSuiteDigest:policy.resource.data.checkSuiteDigest,obligationIds:envelope.payload.obligationIds,summary:'Synthetic independent reviewer inspected the exact original Git README and diff; pagination documentation is absent.',verdict:'failed',findings:[findings[0]!.id]}});
+  const originalReview=await contributor.reviews(view.id);expect(originalReview.at(-1)!.data.verdict).toBe('failed');
+  expect(await contributor.resolveFinding(findings[0]!.id,{requestId:crypto.randomUUID(),payload:{viewId:view.id,note:'Contributor cannot resolve.'}}).catch((e:any)=>e)).toMatchObject({status:403});
+  expect(await reviewer.resolveFinding(findings[0]!.id,{requestId:crypto.randomUUID(),payload:{viewId:view.id,note:'premature'}}).catch((e:any)=>e)).toMatchObject({status:422});
+
+  const repairRunnerResponse=await fetch(sessionUrl,{method:'POST',headers:{authorization:'Bearer '+'1'.repeat(64),'content-type':'application/json'},body:JSON.stringify({projectId:repo.projectId,expiresInSeconds:120,maxOperations:60})});expect(repairRunnerResponse.status).toBe(201);
+  const repairIssued=await repairRunnerResponse.json() as any;
+  const repairRunner=new WorkspaceClient({baseUrl:origin,projectId:repo.projectId,token:repairIssued.token,maxRequests:60,deadline:90000});
+  const repairBaseOid=git('-C',sourceWork,'rev-parse','HEAD');
+  await writeFile(join(sourceWork,'README.md'),`# browser-repo\n\nActual local Git source, synthetic provider binding\n\n## Pagination behavior\n\nThe project-list API returns results scoped to the requested tenant. Results are ordered by creation time descending, then project ID ascending for ties. Pass a positive limit (maximum 50) and use the opaque nextCursor to retrieve the next page. Cursors are tenant-specific; changing tenants starts from the first page. Invalid limits, malformed cursors, and cursors for another tenant return HTTP 400.\n`);
+  // Replacement revisions are full single-parent deltas against the declared
+  // baseline, not incremental commits parented on the prior revision.
+  git('-C',sourceWork,'reset','--soft',repo.source.commitOid);
+  git('-C',sourceWork,'add','README.md');git('-C',sourceWork,'commit','-qm','document pagination contract in README');
+  const repairCommit=git('-C',sourceWork,'rev-parse','HEAD'),repairTree=git('-C',sourceWork,'rev-parse','HEAD^{tree}');expect(repairCommit).not.toBe(revision.data.commitOid);expect(repairTree).not.toBe(revision.data.treeOid);
+  const repairRevision=await contributor.publishRevision(change.id,{requestId:crypto.randomUUID(),payload:{baseCommitOid:repo.source.commitOid,commitOid:repairCommit,treeOid:repairTree,obligationIds:envelope.payload.obligationIds,decisionRevisions:[],dependencies:[]}});
+  expect(repairRevision.data.status).toBe('reserved');
+  expect((await runSourceJob(repairRunner,{remote:localBare,workspaceRoot:work,resolveRepository:()=>sourceWork,requestId:'continuous44-repair-publication',sourceBackend:'artifacts-git'}))?.data.status).toBe('completed');
+  const publishedRepair=await contributor.change(change.id);expect(publishedRepair.data.revisions.at(-1)!.revisionId).toBe(repairRevision.id);
+  const repairProposal=await contributor.proposeRepair(findings[0]!.id,{requestId:crypto.randomUUID(),expectedVersion:originalFinding.version,payload:{revisions:[{changeId:change.id,revisionId:repairRevision.id}]}});expect(repairProposal.data.status).toBe('repair-proposed');
+  const replacementCreated=await contributor.createView({requestId:crypto.randomUUID(),payload:{...created.data.manifest,orderedRevisions:[{changeId:change.id,revisionId:repairRevision.id}],baseVersion:baseline.resource.version,baseCommitOid:baseline.resource.commitOid}});
+  expect((await runSourceJob(repairRunner,{remote:localBare,workspaceRoot:work,resolveRepository:()=>sourceWork,requestId:'continuous44-repair-composition',sourceBackend:'artifacts-git'}))?.data.status).toBe('completed');
+  const replacement=await contributor.view(replacementCreated.id);expect(replacement.data.status).toBe('runnable');
+  const replacementReadme=git('-C',bare,'show',replacement.data.receipt!.commitOid+':README.md');expect(replacementReadme).toContain('opaque nextCursor');expect(replacementReadme).toContain('tenant-specific');
+  const repairChecks=await runViewMandatoryDemoSuite(repairRunner,{remote:localBare,workspaceRoot:work,viewId:replacement.id,projectId:repo.projectId,requestId:'continuous44-repair-mandatory'});expect(repairChecks.map(c=>c.data.result)).toEqual(['passed','passed']);
+  const repairSource=await verifyViewSource(repairRunner,{remote:localBare,viewId:replacement.id,requestId:'continuous44-repair-source'});expect(repairSource.data.receipt).toMatchObject({ref:replacement.data.receipt!.ref,commitOid:replacement.data.receipt!.commitOid,treeOid:replacement.data.receipt!.treeOid});
+  const repairArtifact=await buildReviewArtifact(repairRunner,{remote:localBare,workspaceRoot:work,viewId:replacement.id});expect(repairArtifact.data.diff.files).toContain('README.md');
+  await expect(reviewer.resolveFinding(findings[0]!.id,{requestId:crypto.randomUUID(),expectedVersion:repairProposal.version,payload:{viewId:replacement.id,note:'before review'}})).rejects.toMatchObject({status:409});
+  await reviewer.reviewView(replacement.id,{requestId:crypto.randomUUID(),payload:{viewId:replacement.id,manifestDigest:replacement.data.manifestDigest!,composedCommitOid:replacement.data.receipt!.commitOid,treeOid:replacement.data.receipt!.treeOid,contractVersion:1,policyVersion:policy.resource.version,checkSuiteDigest:policy.resource.data.checkSuiteDigest,obligationIds:envelope.payload.obligationIds,summary:'Synthetic independent review inspected replacement Git README and actual README diff; required pagination ordering, tenant-scoped opaque cursor, and validation documentation are present.',verdict:'passed',findings:[]}});
+  const resolution=await reviewer.resolveFinding(findings[0]!.id,{requestId:crypto.randomUUID(),expectedVersion:repairProposal.version,payload:{viewId:replacement.id,note:'Synthetic independent review verified repaired README, exact source, and fresh passing mandatory suites.'}});expect(resolution.data.status).toBe('resolved');
+  expect((await contributor.finding(findings[0]!.id)).data).toEqual(resolution.data);
+  expect(await contributor.view(view.id)).toEqual(originalView);expect(await contributor.checks(view.id)).toEqual(originalChecks);expect(await contributor.baseline()).toEqual(originalBaseline);
+  expect(git('-C',bare,'rev-parse',originalRef)).toBe(originalCommit);expect(git('-C',bare,'rev-parse',originalRef+'^{tree}')).toBe(originalTree);
+  expect((await contributor.readiness(replacement.id)).ready).toBe(true);expect((await contributor.readiness(view.id)).ready).toBe(false);
+  for(const path of ['/views/'+replacement.id+'/confirmations','/acceptances'])expect((await fetch(origin+'/api/v1/projects/'+repo.projectId+path,{method:'POST',headers:{authorization:'Bearer '+repairIssued.token,'content-type':'application/json'},body:JSON.stringify({})})).status).toBe(403);
+  await navigate('/browser-owner/browser-repo/candidates/'+replacement.id);
+  expect(await evaluate('document.body.innerText')).toContain('resolved');
+  // Observe reserved owner controls on the actual Project-backed page without
+  // clicking confirmation or acceptance. Mock click wiring is tested separately.
+  expect(await evaluate('!!document.querySelector("button.confirm-candidate")')).toBe(true);
+  expect(await evaluate('document.querySelector("button.accept-candidate").disabled')).toBe(true);
+  expect(await evaluate('document.querySelector("input[name=reviewed]").checked')).toBe(false);
+  await evaluate('document.querySelector("form[data-api=confirm-candidate]").scrollIntoView({block:"center"})');
+  const decisionCapture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);
+  await mkdir(resolve('reports/evaluation/continuous45-integrated'),{recursive:true});
+  await writeFile(resolve('reports/evaluation/continuous45-integrated/decision.png'),Buffer.from(decisionCapture.data,'base64'));
+  for(const [tab,needle] of [['Files changed','README.md'],['Checks','mandatory-demo-api'],['Preview','Isolated project-list demo preview']] as const){await navigate('/browser-owner/browser-repo/candidates/'+replacement.id+'?tab='+encodeURIComponent(tab));expect(await evaluate('document.body.innerText')).toContain(needle);}
+  const repairedCapture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);const repairEvidence=resolve('reports/evaluation/continuous44-integrated');await mkdir(repairEvidence,{recursive:true});await writeFile(join(repairEvidence,'repaired.png'),Buffer.from(repairedCapture.data,'base64'));
+  await writeFile(join(repairEvidence,'journey.json'),JSON.stringify({provenance:'Actual local Worker/SQLite, assigned owner-scoped contributor, separate owner-issued synthetic reviewer, real Git README repair/publication/composition/readback, actual source verification, review artifact and mandatory API/UI suites. Prepared first-party fixture only; provider metadata/token and HTTPS mapping synthetic. No native cloud, actual AI review, human confirmation, or acceptance.',actors:{owner:'browser-owner',contributor:change.owner,reviewer:'synthetic owner-issued reviewer',runner:'scoped local runner'},projectId:repo.projectId,originalView:view.id,originalCommit,originalTree,originalRef,replacementView:replacement.id,replacementCommit:replacement.data.receipt!.commitOid,replacementTree:replacement.data.receipt!.treeOid,repairRevision:repairRevision.id,reviewVerdicts:['failed','passed'],checks:repairChecks.map(c=>({id:c.data.checkId,result:c.data.result})),sourceVerified:!!repairSource.data.receipt,reviewArtifactFiles:repairArtifact.data.diff.files,finding:resolution.data,baselineUnchanged:true,replacementReady:true,humanAccepted:false},null,2));
   for(const [tab,expected] of [['Files changed','demo/seed/index.ts'],['Checks','mandatory-demo-api'],['Preview','Isolated project-list demo preview']]){
     await navigate('/browser-owner/browser-repo/candidates/'+view.id+'?tab='+encodeURIComponent(tab!));expect(await evaluate('document.body.innerText')).toContain(expected!);
     const capture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);await writeFile(resolve('reports/evaluation/continuous43-integrated/'+tab!.toLowerCase().replaceAll(' ','-')+'.png'),Buffer.from(capture.data,'base64'));
