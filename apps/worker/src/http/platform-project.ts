@@ -44,9 +44,12 @@ const humanOnly = (method: string, path: string) => method === 'POST' && (
   || /^\/views\/[A-Za-z0-9_-]+\/confirmations$/.test(path)
   || /^\/decisions\/[A-Za-z0-9_-]+\/resolve$/.test(path)
 );
+const isServiceRunnerRoute = (method: string, path: string) =>
+  (method === 'GET' && (isPublicRead(method, path) || /^\/runner\/jobs\/[A-Za-z0-9_-]+$/.test(path)))
+  || (method === 'POST' && (path === '/runner/claim' || /^\/runner\/jobs\/[A-Za-z0-9_-]+\/(?:publish-artifacts|complete)$/.test(path) || /^\/runner\/views\/[A-Za-z0-9_-]+\/(?:checks|source-verifications|review-artifacts)$/.test(path)));
 const knownProjectRoute = (method: string, path: string) => {
-  if (method === 'GET') return isPublicRead(method, path) || /^\/acceptances\/[A-Za-z0-9_-]+$/.test(path);
-  if (method === 'POST') return path === '/baseline/initialize' || path === '/policy' || path === '/contracts/proposals'
+  if (method === 'GET') return isPublicRead(method, path) || /^\/runner\/jobs\/[A-Za-z0-9_-]+$/.test(path) || /^\/acceptances\/[A-Za-z0-9_-]+$/.test(path);
+  if (method === 'POST') return path === '/baseline/initialize' || path === '/policy' || path === '/contracts/proposals' || path === '/runner/claim'
     || path === '/claims' || path === '/decisions' || path === '/views' || path === '/changes' || path === '/findings'
     || path === '/acceptances' || /^\/views\/[A-Za-z0-9_-]+\/confirmations$/.test(path)
     || /^\/changes\/[A-Za-z0-9_-]+\/revisions$/.test(path)
@@ -95,11 +98,12 @@ export async function platformProjectRoute(request: Request, env: Env): Promise<
   if (path.startsWith('/internal/')) return json({ code: 'NOT_FOUND', message: 'Not found' }, 404);
   if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(request.method)) return json({ code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed' }, 405);
   if (!knownProjectRoute(request.method, path)) return json({ code: 'NOT_FOUND', message: 'Unknown project route' }, 404);
-  if (request.method === 'GET' && !isPublicRead(request.method, path)) return json({ code: 'FORBIDDEN', message: 'Project resource is not publicly readable' });
+  if (request.method === 'GET' && !isPublicRead(request.method, path) && !(decision.actor?.kind === 'service-runner' && /^\/runner\/jobs\/[A-Za-z0-9_-]+$/.test(path))) return json({ code: 'FORBIDDEN', message: 'Project resource is not publicly readable' });
   if (!decision.actor || decision.actor.projectId !== projectId) return json({ code: 'FORBIDDEN', message: 'Project access denied' });
   const actor = decision.actor;
   if (humanOnly(request.method, path) && actor.kind !== 'human') return json({ code: 'FORBIDDEN', message: 'Human actor required' });
   if (actor.kind === 'agent' && !isAgentRoute(request.method, path)) return json({ code: 'FORBIDDEN', message: 'Agent route is not permitted' });
+  if (actor.kind === 'service-runner' && (actor.role !== 'runner' || !isServiceRunnerRoute(request.method, path))) return json({ code: 'FORBIDDEN', message: 'Runner route is not permitted' });
   if (actor.kind === 'public' && !isPublicRead(request.method, path)) return json({ code: 'FORBIDDEN', message: 'Public route is read-only' });
   if (actor.kind === 'human' && request.method !== 'GET' && !request.headers.get('origin')) return json({ code: 'CSRF', message: 'Origin required' }, 403);
 

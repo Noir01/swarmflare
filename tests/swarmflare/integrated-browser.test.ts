@@ -6,6 +6,13 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { launchLocalBrowser } from '../../packages/browser-test/index';
+import { WorkspaceClient } from '../../packages/client/index';
+import { runSourceJob } from '../../packages/local-runner/index';
+import { verifyViewSource, runViewMandatoryDemoSuite } from '../../packages/local-runner/checks';
+import { buildReviewArtifact } from '../../packages/local-runner/review-artifact';
+import { mandatoryDemoSuiteDigest } from '../../packages/git-runner/checks/mandatory-demo-suite';
+import { demoPolicyManifest } from '../../apps/worker/src/generated/demo-policy';
+import { preparedPaginatedDemo } from '../fixtures/paginated-demo';
 
 let runtime: Miniflare | undefined;
 let browser: Awaited<ReturnType<typeof launchLocalBrowser>> | undefined;
@@ -39,13 +46,13 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
     export const refreshRepository = (_binding, source) => refresh(fixture,source);
   `;
   const factoryModule = `import { createArtifactsSourceStore as create, resolveArtifactsSourceStore as resolve } from ${JSON.stringify(resolve('apps/worker/src/artifacts/source.ts'))};import {nativeFixture} from 'fixture-native';export const createArtifactsSourceStore=(env,id)=>create({...env,ARTIFACTS:nativeFixture},id);export const resolveArtifactsSourceStore=(env,id)=>resolve({...env,ARTIFACTS:nativeFixture},id);`;
-  const bundle = await build({ stdin:{contents:`import worker from './apps/worker/src/index';export {Project,Platform} from './apps/worker/src/index';import {nativeFixture} from 'fixture-native';export default {fetch:(request,env)=>worker.fetch(request,{...env,ARTIFACTS:nativeFixture})};`,resolveDir:process.cwd(),loader:'ts'}, bundle: true, platform: 'browser', format: 'esm', write: false, external: ['cloudflare:workers'], plugins: [{ name: 'synthetic-provider-real-git', setup(builder) {
+  const bundle = await build({ stdin:{contents:`import worker from './apps/worker/src/index';export {Project} from './apps/worker/src/index';import {Platform as BasePlatform} from './apps/worker/src/platform/index';export class Platform extends BasePlatform {async fetch(request){if(new URL(request.url).pathname==='/fixture-expire'){this.ctx.storage.sql.exec('UPDATE runner_sessions SET expires=0');return new Response(null,{status:204})}return super.fetch(request)}}import {nativeFixture} from 'fixture-native';export default {fetch:(request,env)=>new URL(request.url).pathname==='/fixture-expire'?env.PLATFORM.get(env.PLATFORM.idFromName('swarmflare-platform-v1')).fetch(request):worker.fetch(request,{...env,ARTIFACTS:nativeFixture})};`,resolveDir:process.cwd(),loader:'ts'}, bundle: true, platform: 'browser', format: 'esm', write: false, external: ['cloudflare:workers'], plugins: [{ name: 'synthetic-provider-real-git', setup(builder) {
     builder.onResolve({ filter: /^\.\/repository-source$/ }, args => args.importer.endsWith('/platform/index.ts') ? { path: 'fixture-source', namespace: 'fixture' } : undefined);
     builder.onResolve({filter:/^fixture-native$/},()=>({path:'fixture-source',namespace:'fixture'}));
     builder.onResolve({filter:/^\.\.\/artifacts\/source$/},args=>args.importer.endsWith('/project/index.ts')?{path:'fixture-factory',namespace:'fixture'}:undefined);
     builder.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ contents: args.path==='fixture-factory'?factoryModule:fixtureModule, loader: 'ts', resolveDir: process.cwd() }));
   } }] });
-  runtime = new Miniflare(convertV4MiniflareOptions({ name: 'swarmflare-integrated-test', modules: true, script: bundle.outputFiles[0]!.text, compatibilityDate: '2026-08-01', durableObjects: { PLATFORM: { className: 'Platform', useSQLite: true }, PROJECTS: { className: 'Project', useSQLite: true } }, host: '127.0.0.1', port: 0, outboundService: async (request: Request) => {
+  runtime = new Miniflare(convertV4MiniflareOptions({ name: 'swarmflare-integrated-test', modules: true, script: bundle.outputFiles[0]!.text, compatibilityDate: '2026-08-01', bindings:{RUNNER_SERVICE_KEY:'1'.repeat(64)}, durableObjects: { PLATFORM: { className: 'Platform', useSQLite: true }, PROJECTS: { className: 'Project', useSQLite: true } }, host: '127.0.0.1', port: 0, outboundService: async (request: Request) => {
     const url = new URL(request.url);
     if (url.hostname === 'fixture.internal' && url.pathname === '/create') {
       const name = await request.text(); expect(name).toMatch(/^sf-[a-f0-9-]+$/);
@@ -90,7 +97,7 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   await evaluate('document.querySelector("form[data-api=agent-grant]").requestSubmit()');
   await wait('document.querySelector("form[data-api=agent-grant] [role=status]").textContent.includes("one-time")');
   const grantToken = await evaluate('document.querySelector("form[data-api=agent-grant] [role=status]").textContent.match(/[a-f0-9]{64}/)[0]');
-  const envelope = { requestId: crypto.randomUUID(), payload: { title: 'Agent contribution through scoped access', obligationIds: ['readme'] } };
+  const envelope = { requestId: crypto.randomUUID(), payload: { title: 'Prepared first-party pagination fixture through scoped access', obligationIds: demoPolicyManifest.contract.obligations.map(o=>o.id) } };
   const contribution = await fetch(origin + '/api/v1/projects/' + repo.projectId + '/changes', { method: 'POST', headers: { authorization: 'Bearer ' + grantToken, 'content-type': 'application/json' }, body: JSON.stringify(envelope) });
   // A new repository has no human-approved task yet. A scoped grant must not
   // silently manufacture that prerequisite just to submit a Change.
@@ -103,13 +110,13 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   expect(context.resource.claims[0].data.areas).toEqual(['src/readme']);
   await navigate('/browser-owner/browser-repo/tasks');
   expect(await evaluate('document.body.innerText')).toContain('working');
-  await evaluate(`document.querySelector('#proposal-outcome').value='Document the repository API';document.querySelector('#obligation-id').value='readme';document.querySelector('#obligation-description').value='README explains source and agent access';document.querySelector('#required-checks').value='readme-check';document.querySelector('form[data-api="task-proposal"]').requestSubmit()`);
-  await wait('document.querySelector("form[data-api=task-proposal] [role=status]").textContent.includes("proposed") || document.querySelector("form[data-api=task-proposal] [role=status]").textContent.includes("Proposal")');
+  await evaluate('document.querySelector("form[data-api=demo-task-proposal]").requestSubmit()');
+  await wait('document.body.innerText.includes("awaiting human approval")');
   const proposals = await fetch(origin + '/api/v1/projects/' + repo.projectId + '/proposals').then(r => r.json()) as any;
   expect(proposals.resource).toHaveLength(1);
-  expect(proposals.resource[0].data.outcome).toBe('Document the repository API');
+  expect(proposals.resource[0].data.outcome).toBe(demoPolicyManifest.contract.outcome);
   await navigate('/browser-owner/browser-repo/tasks');
-  expect(await evaluate('document.body.innerText')).toContain('Document the repository API');
+  expect(await evaluate('document.body.innerText')).toContain(demoPolicyManifest.contract.outcome);
   expect(await evaluate('document.body.innerText')).toContain('awaiting human approval');
   // Synthetic local owner explicitly approves; no real human/cloud decision.
   await evaluate('document.querySelector("form[data-api=task-approval]").requestSubmit()');
@@ -117,6 +124,11 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   const approved = await fetch(origin + '/api/v1/projects/' + repo.projectId + '/context').then(r=>r.json()) as any;
   expect(approved.resource.contract.version).toBe(1);
   expect(approved.resource.contract.owner).toBe(repo.ownerId);
+  await evaluate('document.querySelector("form[data-api=configure-policy]").requestSubmit()');
+  await wait('document.body.innerText.includes("Current policy is configured")');
+  const policy=await fetch(origin+'/api/v1/projects/'+repo.projectId+'/policy').then(r=>r.json()) as any;
+  expect(policy.resource.data.checkSuiteDigest).toBe(mandatoryDemoSuiteDigest());
+  expect(policy.resource.data.requireIndependentReview).toBe(true);
   const initEnvelope={requestId:crypto.randomUUID(),expectedVersion:0,payload:{commitOid:repo.source.commitOid,treeOid:repo.source.treeOid}};
   const initPath=origin+'/api/swarmflare/repos/browser-owner/browser-repo/baseline/initialize';
   expect((await fetch(initPath,{method:'POST',headers:{origin,authorization:'Bearer '+grantToken,'content-type':'application/json'},body:JSON.stringify(initEnvelope)})).status).toBe(403);
@@ -129,13 +141,55 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   expect(baseline.resource.receipt.backend).toBe('artifacts-git');
   expect(git('-C',bare,'rev-parse',baseline.resource.receipt.ref)).toBe(repo.source.commitOid);
   expect(git('-C',bare,'rev-parse',baseline.resource.receipt.ref+'^{tree}')).toBe(repo.source.treeOid);
-  expect((await fetch(origin+'/api/v1/projects/'+repo.projectId+'/policy').then(r=>r.json()) as any).resource).toBeNull();
+
   const allowedChange = await fetch(origin+'/api/v1/projects/'+repo.projectId+'/changes',{method:'POST',headers:{authorization:'Bearer '+grantToken,'content-type':'application/json'},body:JSON.stringify(envelope)});
   expect(allowedChange.status).toBe(201);
-  expect((await allowedChange.json() as any).resource.owner).toBe(claim.resource.owner);
+  const change=(await allowedChange.json() as any).resource;expect(change.owner).toBe(claim.resource.owner);
   const safeEvidenceDir=resolve('reports/evaluation/continuous42-integrated');await mkdir(safeEvidenceDir,{recursive:true});
   const taskCapture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);await writeFile(join(safeEvidenceDir,'tasks.png'),Buffer.from(taskCapture.data,'base64'));
   await writeFile(join(safeEvidenceDir,'baseline.json'),JSON.stringify({provenance:'Actual local Worker/SQLite accounts, explicit synthetic owner task approval, actual Git immutable seed source and verified readback. Provider metadata/token RPC and HTTPS mapping synthetic. Not native cloud, human review or acceptance.',projectId:repo.projectId,baseline:baseline.resource,approvedContractVersion:1},null,2));
+  const sessionUrl=origin+'/api/platform/runner/sessions',scope={projectId:repo.projectId,expiresInSeconds:120,maxOperations:60};
+  expect((await fetch(sessionUrl,{method:'POST',headers:{authorization:'Bearer '+grantToken,'content-type':'application/json'},body:JSON.stringify(scope)})).status).toBe(403);
+  const issuedResponse=await fetch(sessionUrl,{method:'POST',headers:{authorization:'Bearer '+'1'.repeat(64),'content-type':'application/json'},body:JSON.stringify(scope)});expect(issuedResponse.status).toBe(201);
+  const issued=await issuedResponse.json() as any;
+  const ownerKeyDenied=await evaluate(`fetch('/api/platform/runner/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(${JSON.stringify(scope)})}).then(r=>r.status)`);expect(ownerKeyDenied).toBe(403);
+  const second=await evaluate(`fetch('/api/platform/auth/session').then(r=>r.json()).then(s=>fetch('/api/platform/repos',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify({name:'other-repo',initializeReadme:true})})).then(r=>r.json())`);
+  expect((await fetch(origin+'/api/v1/projects/'+second.repository.projectId+'/context',{headers:{authorization:'Bearer '+issued.token}})).status).toBe(403);
+  const oneOperation=await fetch(sessionUrl,{method:'POST',headers:{authorization:'Bearer '+'1'.repeat(64),'content-type':'application/json'},body:JSON.stringify({...scope,maxOperations:1})}).then(r=>r.json()) as any;
+  expect((await fetch(origin+'/api/v1/projects/'+repo.projectId+'/context',{headers:{authorization:'Bearer '+oneOperation.token}})).status).toBe(200);
+  expect((await fetch(origin+'/api/v1/projects/'+repo.projectId+'/context',{headers:{authorization:'Bearer '+oneOperation.token}})).status).toBe(403);
+  expect((await fetch(sessionUrl,{method:'POST',headers:{authorization:'Bearer '+'1'.repeat(64),'content-type':'application/json'},body:JSON.stringify({...scope,role:'human'})})).status).toBe(400);
+  const fakePolicy=await evaluate(`fetch('/api/platform/auth/session').then(r=>r.json()).then(s=>fetch('/api/swarmflare/repos/browser-owner/browser-repo/policy',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify({requestId:crypto.randomUUID(),expectedVersion:1,contractVersion:1,checkSuiteDigest:'fake'})})).then(r=>r.status)`);expect(fakePolicy).toBe(400);
+  const runner=new WorkspaceClient({baseUrl:origin,projectId:repo.projectId,token:issued.token,maxRequests:60,deadline:90000});
+  const contributor=new WorkspaceClient({baseUrl:origin,projectId:repo.projectId,token:grantToken,maxRequests:60,deadline:90000});
+  for(const path of ['/acceptances','/baseline/initialize','/policy','/contracts/proposals','/views/forged/confirmations'])expect((await fetch(origin+'/api/v1/projects/'+repo.projectId+path,{method:'POST',headers:{authorization:'Bearer '+issued.token,'content-type':'application/json'},body:JSON.stringify({})})).status).toBe(403);
+  const localBare=join(scratch,'runner-cache.git'),sourceWork=join(scratch,'runner-source'),work=join(scratch,'runner-work');await mkdir(work);
+  git('init','--bare','-q','--initial-branch=main',localBare);git('-C',bare,'push',localBare,baseline.resource.receipt.ref);
+  git('clone','-q',bare,sourceWork);git('-C',sourceWork,'config','user.name','Synthetic first-party fixture');git('-C',sourceWork,'config','user.email','fixture@example.invalid');
+  await mkdir(join(sourceWork,'demo/seed'),{recursive:true});await writeFile(join(sourceWork,'demo/seed/index.ts'),preparedPaginatedDemo);git('-C',sourceWork,'add','.');git('-C',sourceWork,'commit','-qm','prepared first-party pagination fixture');
+  const revision=await contributor.publishRevision(change.id,{requestId:crypto.randomUUID(),payload:{baseCommitOid:repo.source.commitOid,commitOid:git('-C',sourceWork,'rev-parse','HEAD'),treeOid:git('-C',sourceWork,'rev-parse','HEAD^{tree}'),obligationIds:envelope.payload.obligationIds,decisionRevisions:[],dependencies:[]}});
+  expect((await runSourceJob(runner,{remote:localBare,workspaceRoot:work,resolveRepository:()=>sourceWork,requestId:'mapped-publication',sourceBackend:'artifacts-git'}))?.data.status).toBe('completed');
+  const created=await contributor.createView({requestId:crypto.randomUUID(),payload:{baseVersion:baseline.resource.version,baseCommitOid:repo.source.commitOid,contractVersion:approved.resource.contract.version,policyVersion:policy.resource.version,orderedRevisions:[{changeId:change.id,revisionId:revision.id}],excludedChangeIds:[],decisionRevisions:[],compositionVersion:1}});
+  expect((await runSourceJob(runner,{remote:localBare,workspaceRoot:work,resolveRepository:()=>sourceWork,requestId:'mapped-composition',sourceBackend:'artifacts-git'}))?.data.status).toBe('completed');
+  const view=await contributor.view(created.id);expect(git('-C',bare,'rev-parse',view.data.receipt!.ref)).toBe(view.data.receipt!.commitOid);
+  await verifyViewSource(runner,{remote:localBare,viewId:view.id,requestId:'mapped-source-verification'});
+  const checks=await runViewMandatoryDemoSuite(runner,{remote:localBare,workspaceRoot:work,viewId:view.id,projectId:repo.projectId,requestId:'mapped-mandatory'});expect(checks.map(c=>c.data.result)).toEqual(['passed','passed']);
+  const artifact=await buildReviewArtifact(runner,{remote:localBare,workspaceRoot:work,viewId:view.id});expect(artifact.data.diff.files).toContain('demo/seed/index.ts');
+  expect((await contributor.readiness(view.id)).ready).toBe(false);
+  await navigate('/browser-owner/browser-repo/candidates/'+view.id);
+  await evaluate("document.querySelector('#finding-expected').value='Document pagination behavior in the README';document.querySelector('#finding-observed').value='README still contains initial repository description only';document.querySelector('#finding-paths').value='README.md';document.querySelector('form[data-api=request-changes]').requestSubmit()");
+  await wait('document.body.innerText.includes("README still contains initial repository description only") && document.body.innerText.includes("open")');
+  const findings=await contributor.findings();expect(findings).toHaveLength(1);expect(findings[0]!.data.nextOwner).toBe(change.owner);expect(findings[0]!.data.viewId).toBe(view.id);
+  expect(await contributor.baseline()).toEqual(baseline.resource);expect((await contributor.readiness(view.id)).ready).toBe(false);
+  const candidateCapture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);await mkdir(resolve('reports/evaluation/continuous43-integrated'),{recursive:true});await writeFile(resolve('reports/evaluation/continuous43-integrated/candidate.png'),Buffer.from(candidateCapture.data,'base64'));
+  await writeFile(resolve('reports/evaluation/continuous43-integrated/journey.json'),JSON.stringify({provenance:'Actual local SQLite account ownership and scoped runner session, real Git publication/composition/readback, actually executed mandatory API/UI suites on prepared FIRST-PARTY trusted fixture (not imported source), persisted browser request-changes. Native provider/token/HTTPS mapping synthetic. No cloud or real human acceptance.',projectId:repo.projectId,viewId:view.id,source:view.data.receipt,policyDigest:policy.resource.data.checkSuiteDigest,checks:checks.map(c=>({id:c.data.checkId,result:c.data.result})),finding:findings[0],baselineUnchanged:true,ready:false},null,2));
+  for(const [tab,expected] of [['Files changed','demo/seed/index.ts'],['Checks','mandatory-demo-api'],['Preview','Isolated project-list demo preview']]){
+    await navigate('/browser-owner/browser-repo/candidates/'+view.id+'?tab='+encodeURIComponent(tab!));expect(await evaluate('document.body.innerText')).toContain(expected!);
+    const capture=await browser.send('Page.captureScreenshot',{format:'png'},browser.pageSessionId);await writeFile(resolve('reports/evaluation/continuous43-integrated/'+tab!.toLowerCase().replaceAll(' ','-')+'.png'),Buffer.from(capture.data,'base64'));
+  }
+  const preview=await fetch(origin+'/api/swarmflare/repos/browser-owner/browser-repo/candidates/'+view.id+'/preview');expect(preview.status).toBe(200);expect(preview.headers.get('content-security-policy')).toContain('sandbox allow-scripts');expect(preview.headers.get('content-security-policy')).toContain("connect-src 'none'");
+  expect((await fetch(origin+'/fixture-expire',{method:'POST'})).status).toBe(204);
+  expect((await fetch(origin+'/api/v1/projects/'+repo.projectId+'/context',{headers:{authorization:'Bearer '+issued.token}})).status).toBe(403);
   await navigate('/repositories');
   await evaluate('document.querySelector("form[data-api=logout]").requestSubmit()');
   await wait('location.pathname === "/login" || !document.body.innerText.includes("Signed in as")');
@@ -152,4 +206,4 @@ it('navigates real SQLite accounts, Git-backed repository source, scoped contrib
   const capture = await browser.send('Page.captureScreenshot', { format: 'png' }, browser.pageSessionId);
   await writeFile(join(evidenceDir, 'repository.png'), Buffer.from(capture.data, 'base64'));
   await writeFile(join(evidenceDir, 'navigation.json'), JSON.stringify({ provenance: 'Actual Worker/SQLite accounts and actual Git pack source; synthetic Artifacts metadata/token provider and HTTPS mapping. No cloud or human acceptance.', projectId: repo.projectId, commitOid: repo.source.commitOid, journey: ['signup', 'create README repository', 'public source file', 'owner grant', 'Change refused without approved task', 'scoped agent work claim', 'agent acceptance denied', 'task proposal persists awaiting human approval', 'logout', 'email login', 'logout', 'outsider grant denied'], revokedTemporaryTokens: tokens.size }, null, 2));
-}, 60000);
+}, 90000);

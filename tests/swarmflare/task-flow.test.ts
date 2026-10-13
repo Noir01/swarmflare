@@ -37,7 +37,8 @@ describe('task proposal vertical path', () => {
     expect(html).toContain('Proposed · awaiting human approval');
     expect(html).toContain('Export rows as CSV');
     expect(html).toContain('header included');
-    expect(html).toContain('required-checks');
+    expect(html).toContain('data-api="demo-task-proposal"');
+    expect(html).toContain('data-api="task-proposal"');
     expect(html).toContain('data-api="task-approval"');
     expect(html).not.toContain('Current approved task</h2><div class="readme-body"><p>Add CSV export');
   });

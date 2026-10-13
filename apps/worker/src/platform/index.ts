@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { hashPassword, randomToken, sha256, verifyPassword } from './security';
 import { provisionRepository, readRepositorySource, refreshRepository, type PlatformArtifactsBinding, type ProvisionedSource } from './repository-source';
 
-interface Env { ARTIFACTS?: PlatformArtifactsBinding; PROJECTS: DurableObjectNamespace }
+interface Env { ARTIFACTS?: PlatformArtifactsBinding; PROJECTS: DurableObjectNamespace; RUNNER_SERVICE_KEY?: string }
 type RepoRow = { id: string; owner: string; ownerId: string; name: string; description: string; project: string; status: string; created: number; artifacts: string; source: string | null; error: string | null };
 type Session = { user: { id: string; username: string }; csrf: string; expires: number; token: string };
 const json = (value: unknown, status = 200, headers: HeadersInit = {}) => { const out = new Headers(headers); out.set('Cache-Control', 'no-store'); return Response.json(value, { status, headers: out }); };
@@ -16,7 +16,13 @@ const repoSchema = z.object({ name: z.string().regex(/^[a-z0-9-]{3,64}$/i).trans
 const importRetrySchema = z.object({ importUrl: z.string().min(1).max(512) }).strict();
 const importRefreshSchema = z.object({ ref: z.literal('refs/heads/master') }).strict();
 const grantSchema = z.object({ role: z.enum(['contributor', 'reviewer']), expiresInSeconds: z.number().int().min(60).max(3600) }).strict();
+const runnerSessionSchema = z.object({ projectId: z.string().regex(/^[A-Za-z0-9_-]{1,120}$/), expiresInSeconds: z.number().int().min(30).max(120), maxOperations: z.number().int().min(1).max(60) }).strict();
 const safeSource = (s: ProvisionedSource) => ({ ref: s.ref, commitOid: s.commitOid, treeOid: s.treeOid });
+const constantTimeHexEqual = (left: string, right: string) => {
+  let difference = left.length ^ right.length;
+  for (let i = 0; i < 64; i++) difference |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
+  return difference === 0;
+};
 
 export class Platform extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -28,6 +34,7 @@ export class Platform extends DurableObject<Env> {
     try { sql.exec('ALTER TABLE repos ADD COLUMN source TEXT'); } catch { /* already migrated */ }
     try { sql.exec('ALTER TABLE repos ADD COLUMN error TEXT'); } catch { /* already migrated */ }
     sql.exec('CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY,repo TEXT,token TEXT UNIQUE,role TEXT,expires INTEGER,revoked INTEGER DEFAULT 0)');
+    sql.exec('CREATE TABLE IF NOT EXISTS runner_sessions(token_hash TEXT PRIMARY KEY,project TEXT NOT NULL,remaining INTEGER NOT NULL,expires INTEGER NOT NULL)');
   }
   private one<T>(query: string, ...args: (string | number)[]): T | null { return (this.ctx.storage.sql.exec<Record<string, any>>(query, ...args).toArray()[0] as T | undefined) ?? null; }
   private rows<T>(query: string, ...args: (string | number)[]): T[] { return this.ctx.storage.sql.exec<Record<string, any>>(query, ...args).toArray() as T[]; }
@@ -90,6 +97,7 @@ export class Platform extends DurableObject<Env> {
       }
       if (path === '/auth/logout' && method === 'POST') { const s = await this.session(request); if (s && !this.writeAllowed(request, s)) return fail('CSRF', 'CSRF token invalid', 403); if (s) this.ctx.storage.sql.exec('DELETE FROM sessions WHERE token=?', await sha256(s.token)); return json({ ok: true }, 200, { 'Set-Cookie': cookie('', 0) }); }
       if (path === '/internal/authorize-project' && method === 'POST') return this.authorizeProject(request);
+      if (path === '/runner/sessions' && method === 'POST') return this.createRunnerSession(request);
       if (path === '/internal/source-config' && method === 'POST') return this.sourceConfig(request);
       const session = await this.session(request);
       const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh|retry)(?:\/([^/]+))?)?$/);
@@ -170,6 +178,25 @@ export class Platform extends DurableObject<Env> {
     if (row.status !== 'ready' || !stored || stored.status !== 'ready' || !stored.commitOid || !stored.treeOid || !stored.remote || !stored.artifactsName) return fail('SOURCE_NOT_READY', 'Repository source is not ready', 409);
     return json({ config: { projectId: row.project, repository: row.artifacts, remote: stored.remote, allowWrites: true }, repositoryId: row.id, ownerId: row.ownerId, source: safeSource(stored) });
   }
+  private async createRunnerSession(request: Request): Promise<Response> {
+    const key = this.env.RUNNER_SERVICE_KEY;
+    if (!key || !/^[a-f0-9]{64}$/.test(key)) return fail('UNAVAILABLE', 'Runner service is not configured', 503);
+    const match = request.headers.get('authorization')?.match(/^Bearer ([a-f0-9]{64})$/);
+    if (!match || !constantTimeHexEqual(await sha256(match[1]!), await sha256(key))) return fail('FORBIDDEN', 'Runner service authorization required', 403);
+    const input = this.parsed(runnerSessionSchema, await this.body(request));
+    if (!input) return fail('INVALID_REQUEST', 'Invalid runner session scope', 400);
+    const row = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE project=?', input.projectId);
+    if (!row) return fail('NOT_FOUND', 'Project not found', 404);
+    const source = this.sourceFrom(row);
+    if (row.status !== 'ready' || !source || source.status !== 'ready' || !source.commitOid || !source.treeOid) return fail('SOURCE_NOT_READY', 'Verified repository source required', 409);
+    const token = `sfr_${randomToken()}`;
+    if (!/^sfr_[a-f0-9]{64}$/.test(token)) return fail('UNAVAILABLE', 'Runner token generation failed', 503);
+    const expiresAt = Date.now() + input.expiresInSeconds * 1000;
+    const tokenHash = await sha256(token), identity = tokenHash.slice(0, 32);
+    const id = `${identity.slice(0, 8)}-${identity.slice(8, 12)}-4${identity.slice(13, 16)}-a${identity.slice(17, 20)}-${identity.slice(20, 32)}`;
+    this.ctx.storage.sql.exec('INSERT INTO runner_sessions(token_hash,project,remaining,expires) VALUES(?,?,?,?)', tokenHash, row.project, input.maxOperations, expiresAt);
+    return json({ token, actor: { id, projectId: row.project, role: 'runner' }, expiresAt }, 201);
+  }
   private async authorizeProject(request: Request): Promise<Response> {
     const trusted = request.headers.get('x-swarmflare-internal') === 'platform-worker';
     if (!trusted) return fail('FORBIDDEN', 'Trusted Worker request required', 403);
@@ -177,10 +204,23 @@ export class Platform extends DurableObject<Env> {
     if (!payload) return fail('INVALID_REQUEST', 'Invalid project authorization request', 400);
     const row = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE project=?', payload.projectId);
     if (!row) return fail('PROJECT_UNMAPPED', 'Project is not mapped to a repository', 404);
+    const auth = request.headers.get('authorization');
+    if (auth?.startsWith('Bearer sfr_')) {
+      const raw = auth.slice(7);
+      if (!/^sfr_[a-f0-9]{64}$/.test(raw)) return fail('FORBIDDEN', 'Runner session invalid', 403);
+      const allowedRead = payload.method === 'GET' && (/^\/(?:context|baseline|policy|events|findings|views|changes|revisions|resources)(?:\/|$)/.test(payload.path) || /^\/runner\/jobs\/[A-Za-z0-9_-]+$/.test(payload.path));
+      const allowedWrite = payload.method === 'POST' && (payload.path === '/runner/claim' || /^\/runner\/jobs\/[A-Za-z0-9_-]+\/(?:publish-artifacts|complete)$/.test(payload.path) || /^\/runner\/views\/[A-Za-z0-9_-]+\/(?:checks|source-verifications|review-artifacts)$/.test(payload.path));
+      const session = this.one<{ project: string; remaining: number; expires: number }>('SELECT project,remaining,expires FROM runner_sessions WHERE token_hash=?', await sha256(raw));
+      if (!session || session.project !== payload.projectId || session.expires <= Date.now() || (!allowedRead && !allowedWrite)) return fail('FORBIDDEN', 'Runner session scope denied', 403);
+      const spent = this.ctx.storage.sql.exec('UPDATE runner_sessions SET remaining=remaining-1 WHERE token_hash=? AND project=? AND remaining>0 AND expires>?', await sha256(raw), payload.projectId, Date.now()).rowsWritten;
+      if (!spent) return fail('FORBIDDEN', 'Runner session operation budget exhausted', 403);
+      const identity = (await sha256(raw)).slice(0, 32);
+      const actorId = `${identity.slice(0, 8)}-${identity.slice(8, 12)}-4${identity.slice(13, 16)}-a${identity.slice(17, 20)}-${identity.slice(20, 32)}`;
+      return json({ actor: { id: actorId, projectId: row.project, role: 'runner', kind: 'service-runner' }, repository: this.repo(row) });
+    }
     if (payload.method === 'GET' && row.status === 'ready') return json({ actor: { id: row.id, projectId: row.project, role: 'contributor', kind: 'public' }, repository: this.repo(row) });
     const s = await this.session(request);
     if (s && this.writeAllowed(request, s) && s.user.id === row.ownerId) return json({ actor: { id: s.user.id, projectId: row.project, role: 'human', kind: 'human' }, repository: this.repo(row) });
-    const auth = request.headers.get('authorization');
     if (auth && /^Bearer [a-f0-9]{64}$/.test(auth)) {
       const grant = this.one<{ id: string; repo: string; role: string; expires: number }>('SELECT id,repo,role,expires FROM grants WHERE token=? AND revoked=0', await sha256(auth.slice(7)));
       if (grant && grant.repo === row.id && grant.expires > Date.now() && (grant.role === 'contributor' || grant.role === 'reviewer')) return json({ actor: { id: grant.id, projectId: row.project, role: grant.role, kind: 'agent' }, repository: this.repo(row) });
