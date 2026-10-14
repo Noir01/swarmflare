@@ -1,6 +1,6 @@
-import { build } from 'esbuild';
+import { build, stop as stopEsbuild, version as esbuildVersion } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseCredentials } from '../worker/src/http/router';
@@ -8,6 +8,30 @@ import { parseCredentials } from '../worker/src/http/router';
 export type LocalWorkspaceOptions={stateDirectory:string;port?:number;authCredentials:string;dashboardSessionKey:string;runBudgetMs:number;signal?:AbortSignal};
 export type LocalWorkspace={url:string;closed:Promise<void>;close():Promise<void>};
 const MAX_BUDGET=1_800_000;
+async function closeCliBuildServices(){
+ // Stop owned subprocesses while their esbuild worker threads can still reap
+ // them. esbuild.stop() terminates those threads without awaiting child exit.
+ const parents=new Map<number,number>(),services=new Set<number>();
+ for(const entry of await readdir('/proc'))if(/^\d+$/.test(entry)){try{
+  const stat=await readFile(`/proc/${entry}/stat`,'utf8'),pid=Number(entry);
+  parents.set(pid,Number(stat.slice(stat.lastIndexOf(')')+2).split(' ')[1]));
+  if(stat.slice(stat.indexOf('(')+1,stat.lastIndexOf(')'))==='esbuild')services.add(pid);
+ }catch{}}
+ const descendants=new Set<number>([process.pid]);let changed=true;
+ while(changed){changed=false;for(const [pid,ppid] of parents)if(descendants.has(ppid)&&!descendants.has(pid)){descendants.add(pid);changed=true;}}
+ const owned=new Set<number>();
+ for(const pid of services)if(descendants.has(pid))try{
+  const args=(await readFile(`/proc/${pid}/cmdline`,'utf8')).split('\0');
+  if(args.includes(`--service=${esbuildVersion}`)){process.kill(pid,'SIGTERM');owned.add(pid);}
+ }catch(e:any){if(e.code!=='ENOENT'&&e.code!=='ESRCH')throw e;}
+ const deadline=Date.now()+5000;
+ while(owned.size&&Date.now()<deadline){
+  for(const pid of owned)try{await readFile(`/proc/${pid}/stat`,'utf8');}catch(e:any){if(e.code==='ENOENT')owned.delete(pid);else throw e;}
+  if(owned.size)await new Promise(r=>setTimeout(r,20));
+ }
+ if(owned.size)throw Error('Timed out reaping local CLI build services');
+ await stopEsbuild();
+}
 export async function startLocalWorkspace(options:LocalWorkspaceOptions):Promise<LocalWorkspace>{
  const started=Date.now();
  if(!options||typeof options.stateDirectory!=='string'||!options.stateDirectory.trim())throw new Error('Invalid local workspace configuration');
@@ -39,6 +63,7 @@ const help='Usage: npx tsx apps/local/index.ts --state <directory> --port <port>
 async function main(){
  const startupAbort=new AbortController();let stopping=false,appDuringStartup:LocalWorkspace|undefined,signalClose:Promise<void>|undefined;
  const stop=()=>{stopping=true;startupAbort.abort();if(appDuringStartup)signalClose??=appDuringStartup.close().catch(()=>{process.exitCode=1;});};process.once('SIGINT',stop);process.once('SIGTERM',stop);
+ try{
  const args=process.argv.slice(2);if(args.includes('--help')||args.includes('-h')){process.stdout.write(help);return;}
  const allowed=['--state','--port','--run-seconds'];const seen=new Set<string>();
  for(let i=0;i<args.length;i++){if(!allowed.includes(args[i]!)||seen.has(args[i]!)||!args[i+1]||args[i+1]!.startsWith('--')){process.stderr.write('Invalid local workspace arguments\n');process.exitCode=2;return;}seen.add(args[i]!);i++;}
@@ -52,5 +77,8 @@ async function main(){
  if(stopping)signalClose??=app.close().catch(()=>{process.exitCode=1;});
  await app.closed;process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
  if(signalClose)await signalClose;
+ }finally{
+  await closeCliBuildServices();
+ }
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))void main().catch(()=>{process.stderr.write('Local workspace stopped unexpectedly\n');process.exitCode=1;});

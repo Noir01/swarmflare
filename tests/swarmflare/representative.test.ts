@@ -28,6 +28,18 @@ it('renders safely and exposes repository and candidate navigation', () => {
   expect(html).not.toContain('<script>bad()');
 });
 
+it('keeps the complete public Connect prompt within desktop and phone viewport widths', async () => {
+  server=createServer((_,res)=>{res.writeHead(200,{'content-type':'text/html'});res.end(repositoryHtml({...model,candidate:undefined,selectedTab:'Settings',project:{id:'fixture-project'},origin:'https://first-party.example.test',canManage:false}));});
+  await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));const address=server.address();if(!address||typeof address==='string')throw Error('NO_ADDRESS');
+  browser=await launchLocalBrowser({timeoutMs:60_000});
+  for(const width of [1280,390]){
+    await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false},browser.pageSessionId);
+    await browser.send('Page.navigate',{url:`http://127.0.0.1:${address.port}/sample-owner/pagination-demo/settings`},browser.pageSessionId);await new Promise(r=>setTimeout(r,150));
+    const result=(await browser.send('Runtime.evaluate',{expression:"({fit:document.documentElement.scrollWidth<=innerWidth,prompt:document.querySelector('pre.code').textContent,whiteSpace:getComputedStyle(document.querySelector('pre.code')).whiteSpace})",returnByValue:true},browser.pageSessionId)).result.value;
+    expect(result.prompt).toContain('/skills/swarmflare.md');expect(result.whiteSpace).toBe('pre-wrap');expect(result.fit).toBe(true);
+  }
+},60_000);
+
 it('navigates the representative repository and candidate in Chromium and captures evidence', async () => {
   server = createServer((req, res) => {
     const candidateMode = req.url?.includes('/candidates/view-local-37');

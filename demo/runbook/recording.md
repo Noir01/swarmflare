@@ -1,4 +1,16 @@
-# Recording — continuous35 evidence walkthrough draft
+# Recording — current native capture and historical draft
+
+## Continuous51 native screen recording
+
+The current local-only recording is `reports/evaluation/continuous51-recording/video.mp4`. Independent ffprobe verified H.264, 1280×900, 24fps, 315 seconds (5:15), 7,560 encoded frames and 8,036,186 bytes. SHA-256: `00b7d2a8b870adadb10beb37873350a47fecb88aa69cf21ec478d4c0a1a76eb0`. Seven chapters contain 315 actual timestamped deployed-browser screenshots, not local fixtures or generated UI illustrations. Capture uses separate foreground Chromium lifetimes within the existing 60-second watchdog, closed before the next chapter. No login or owner decision is recorded.
+
+The silent captioned video shows the public landing/tutorial, Artifacts-backed README repository, approved task/original failed review, replacement Checks/Files changed/Conversation, actual Next/Previous/tenant-B preview navigation and real Connect prompt clipboard readback. Commentary is visibly labeled separately from application state. This is edited: the expiring preview was captured first, then chapters were arranged in presentation order and browser-startup gaps omitted. It is not an uninterrupted session, a fresh agent implementation campaign or an arbitrary-code preview service. The prepared first-party source and actual independent Luna review/repair history remain distinct. Native final readback was ready for human review, not accepted, with unchanged catalog source.
+
+Regenerate with `node --import tsx demo/cloud/record-demo.ts` in the supported Node/Chromium/bubblewrap environment with existing ffmpeg on PATH. It needs the sanitized fixed-fixture repository/candidate receipts referenced by the script; reports and media are intentionally absent from public-source snapshots. Explicit attended ingress/grant renewal and bounded preview refresh are separate operator procedures in candidate-smoke.md, never a perpetual process. The driver checks live source identity, refuses unavailable UI and persists completed matching chapters for resume. It must not invent an expired preview or use credentials in URLs/screenshots/manifests. Actual browser clipboard verification awaits the promise, focuses the isolated profile and uses a user gesture; no raw grant is copied.
+
+The recording captures the frontend before the subsequent Connect prompt line-wrapping fix; it remains evidence of the version actually exercised, not of later unexecuted UI. No video upload, public GitHub publication, competition submission, human confirmation or final acceptance was performed or authorized. The older continuous35 draft below is retained as historical evidence only, not the current recording.
+
+## Historical continuous35 evidence walkthrough
 
 Status: `reports/evaluation/continuous35-walkthrough/walkthrough.mp4` was independently verified with ffprobe and decoded video frames: H.264, 1280×720, 2 fps, 320 seconds (5:20). This captioned draft combines historical cloud receipts with explicitly labeled automated local-fixture UI imagery. It is not a live cloud screen capture or a real human session. The final human segment remains unrecorded. SHA-256: `777221b98080f158fb51b66bf5b524aee96218250b5865c2c0312475ade5655a`.
 
