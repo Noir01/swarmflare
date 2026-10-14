@@ -56,7 +56,7 @@ export const demoPolicyManifest = {
     "unresolvedQuestions": []
   },
   "policyTemplate": {
-    "checkSuiteDigest": "33be95ed272023f57cd099b8cc01f159579379d3bf38c42144de25f302b0a9a5",
+    "checkSuiteDigest": "c5a5bb28dc0692abf48d0bf44e97dc6fd4b9362479c60c7c4ecaa28eae6295cb",
     "harnessVersion": "json-oracle-v1",
     "checks": [
       {

@@ -19,13 +19,23 @@ const driver = `
 const write = process.stdout.write.bind(process.stdout);
 const mode = process.argv[2];
 const {html, clientScript, createProjectListHandler} = await import('./demo/seed/index.ts');
-if (mode === 'assets') write(JSON.stringify({html, clientScript}));
-else if (mode === 'api') {
-  const url = process.argv[3];
-  if (!url || url.length > 2048 || !url.startsWith('http://demo.invalid/api/projects?')) throw new Error('invalid api request');
-  const response = await createProjectListHandler()(new Request(url));
-  write(JSON.stringify({status:response.status, body:await response.text()}));
-} else throw new Error('invalid mode');
+if (mode !== 'record') throw new Error('invalid mode');
+const handler = createProjectListHandler(), records = {};
+for (const tenant of ['tenant-a','tenant-b']) {
+  let cursor = null; const seen = new Set();
+  for (let page = 0; page < 6; page++) {
+    const q = new URLSearchParams({tenant,limit:'2'}); if (cursor !== null) q.set('cursor',cursor);
+    const url = 'http://demo.invalid/api/projects?' + q.toString();
+    const response = await handler(new Request(url)); const body = await response.text();
+    if (response.status !== 200 || body.length > 8192) { records[new URL(url).pathname + '?' + new URL(url).searchParams.toString()] = {status:response.status,body}; break; }
+    const parsed = JSON.parse(body), next = parsed?.nextCursor ?? null;
+    if (next !== null && (typeof next !== 'string' || next.length > 2048 || seen.has(next) || page === 5)) throw new Error('invalid cursor traversal');
+    const key = new URL(url).pathname + '?' + [...new URL(url).searchParams.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
+    if (records[key]) throw new Error('duplicate request record'); records[key] = {status:response.status,body};
+    if (next === null) break; seen.add(next); cursor = next;
+  }
+}
+write(JSON.stringify({html, clientScript, records}));
 `;
 const csp = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 const htmlHeaders = [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }, { name: 'Content-Security-Policy', value: csp }];
@@ -106,10 +116,10 @@ export async function runDemoUiSuite(options: { candidateDirectory: string; appl
     const entry = join(staged, 'demo/seed/index.ts');
     if (!(await lstat(entry)).isFile()) throw new Error('Candidate must provide regular demo/seed/index.ts');
     await writeFile(join(staged, driverName), driver, { mode: 0o444 }); await chmod(staged, 0o555);
-    const assetsExec = await runSandboxedNode({ candidateDirectory: staged, entrypoint: driverName, args: ['assets'], timeoutMs: remaining(3000), maxOutputBytes: maxOutput });
+    const assetsExec = await runSandboxedNode({ candidateDirectory: staged, entrypoint: driverName, args: ['record'], timeoutMs: remaining(3000), maxOutputBytes: maxOutput });
     if (assetsExec.status !== 'exited' || assetsExec.exitCode !== 0) throw new Error('Candidate UI asset extraction failed');
-    const assets = JSON.parse(assetsExec.stdout) as { html: string; clientScript: string };
-    if (typeof assets.html !== 'string' || assets.html.length > 16384 || typeof assets.clientScript !== 'string' || assets.clientScript.length > 16384) throw new Error('Candidate UI assets missing or exceed bounds');
+    const assets = JSON.parse(assetsExec.stdout) as { html: string; clientScript: string; records: Record<string,{status:number;body:string}> };
+    if (typeof assets.html !== 'string' || assets.html.length > 16384 || typeof assets.clientScript !== 'string' || assets.clientScript.length > 16384 || !assets.records || Object.keys(assets.records).length > 12) throw new Error('Candidate UI assets or recorded responses missing/exceed bounds');
     browser = await launchIsolatedBrowser({ timeoutMs: remaining(40000) });
     const b = browser;
     await b.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, b.pageSessionId);
@@ -125,10 +135,11 @@ export async function runDemoUiSuite(options: { candidateDirectory: string; appl
         } else if (url.pathname === '/app.js') {
           await b.send('Fetch.fulfillRequest', { requestId: params.requestId, responseCode: 200, responseHeaders: scriptHeaders, body: Buffer.from(assets.clientScript).toString('base64') }, sessionId);
         } else if (url.pathname === '/api/projects') {
-          const exec = await runSandboxedNode({ candidateDirectory: staged, entrypoint: driverName, args: ['api', url.href], timeoutMs: remaining(3000), maxOutputBytes: maxOutput });
-          if (exec.status !== 'exited' || exec.exitCode !== 0) throw new Error('Candidate API request failed in sandbox');
-          const response = JSON.parse(exec.stdout);
-          if (!Number.isInteger(response.status) || typeof response.body !== 'string' || response.body.length > maxOutput) throw new Error('Malformed sandbox API response');
+          if (url.search.length > 2048) throw new Error('Recorded request query exceeds bound');
+          const query = [...url.searchParams.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
+          const response = assets.records[url.pathname + '?' + query];
+          if (!response) throw new Error('Unrecorded UI request blocked');
+          if (!Number.isInteger(response.status) || typeof response.body !== 'string' || response.body.length > 8192) throw new Error('Malformed recorded API response');
           const parsed = JSON.parse(response.body);
           const tenant = url.searchParams.get('tenant');
           const ids = Array.isArray(parsed) ? parsed.map((p: any) => p.id) : Array.isArray(parsed.items) ? parsed.items.map((p: any) => p.id) : [];

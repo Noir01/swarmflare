@@ -11,10 +11,16 @@ const deniedDirectories = new Set(['.git','.ssh','.aws','.config','.gnupg','.her
 const deniedFile = /^(?:\.env(?:\..*)?|.*(?:credential|secret|private[-_]?key.*))$/i;
 const driver = `
 const {html,clientScript,createProjectListHandler}=await import('./demo/seed/index.ts');
-const mode=process.argv[2];
-if(mode==='assets') process.stdout.write(JSON.stringify({html,clientScript}));
-else if(mode==='api') { const u=process.argv[3]; if(!u||!u.startsWith('http://demo.invalid/api/projects?')) throw Error('bad request'); const r=await createProjectListHandler()(new Request(u)); process.stdout.write(JSON.stringify({status:r.status,body:await r.text()})); }
-else throw Error('bad mode');`;
+const handler=createProjectListHandler(),records=[];
+for(const tenant of ['tenant-a','tenant-b']){let cursor=null;const seen=new Set();let terminated=false;
+ for(let page=0;page<6;page++){const u=new URL('http://demo.invalid/api/projects');u.searchParams.set('tenant',tenant);u.searchParams.set('limit','2');if(cursor!==null)u.searchParams.set('cursor',cursor);
+  const response=await handler(new Request(u));const body=await response.text();records.push({url:u.href,status:response.status,body});if(response.status!==200)throw Error('supported pagination response rejected');
+  const parsed=JSON.parse(body);if(!parsed||!Array.isArray(parsed.items)||parsed.items.length>2)throw Error('invalid bounded items');const next=parsed.nextCursor??null;
+  if(next===null){terminated=true;break;}if(typeof next!=='string'||next.length>2048||seen.has(next)||page===5)throw Error('pagination did not terminate');seen.add(next);cursor=next;
+ }
+ if(!terminated)throw Error('pagination did not terminate');
+}
+process.stdout.write(JSON.stringify({html,clientScript,records}));`;
 async function snapshot(src:string,dst:string,state:{files:number;bytes:number},depth=0):Promise<void>{
  if(depth>32)throw Error('Candidate snapshot depth exceeded');
  for(const name of await readdir(src)){
@@ -40,21 +46,15 @@ export async function buildDemoPreview(options:{candidateDirectory:string;expire
   const staged=join(temp,'candidate');await mkdir(staged,{mode:0o755});await snapshot(source,staged,{files:0,bytes:0});
   const es=await lstat(join(staged,'demo/seed/index.ts'));if(!es.isFile()||es.isSymbolicLink())throw Error('Candidate must provide demo/seed/index.ts');
   await writeFile(join(staged,driverName),driver,{mode:0o444});await chmod(staged,0o555);
-  const assets=JSON.parse(await run(staged,['assets'],remaining())) as {html:string;clientScript:string};
+  const output=await run(staged,[],remaining());if(Buffer.byteLength(output)>32768)throw Error('Candidate preview output exceeds 32768 bytes');
+  const assets=JSON.parse(output) as {html:string;clientScript:string;records:Array<{url:string;status:number;body:string}>};
   if(typeof assets.html!=='string'||assets.html.length>12000||typeof assets.clientScript!=='string'||assets.clientScript.length>12000)throw Error('Candidate UI assets missing or too large');
-  const responses=new Map<string,{status:number;body:string}>();
-  for(const tenant of ['tenant-a','tenant-b']){
-   let cursor:string|null=null;const seen=new Set<string>();
-   for(let page=0;page<6;page++){
-    const u=new URL('http://demo.invalid/api/projects');u.searchParams.set('tenant',tenant);u.searchParams.set('limit','2');if(cursor!==null)u.searchParams.set('cursor',cursor);
-    const result=JSON.parse(await run(staged,['api',u.href],remaining())) as {status:number;body:string};if(!Number.isInteger(result.status)||typeof result.body!=='string'||result.body.length>32768)throw Error('Invalid candidate API response');
-    const key=canonical(u);responses.set(key,result);if(result.status!==200)throw Error('Candidate demo API rejected supported tenant pagination request');
-    const body=JSON.parse(result.body);if(!body||!Array.isArray(body.items)||body.items.length>2)throw Error('Candidate API must support bounded limit=2 pagination');
-    const next=body.nextCursor??null;if(next===null)break;if(typeof next!=='string'||next.length>2048||seen.has(next)||page===5)throw Error('Candidate API cursor did not terminate within bounds');seen.add(next);cursor=next;
-   }
-  }
-  const records=[...responses.entries()].map(([key,value])=>[key,{status:value.status,body:value.body}]);
-  const shim=`const __previewExpiry=${expiry};const __previewRecords=new Map(${safeJson(records)});const __previewExpired=()=>{if(Date.now()>=__previewExpiry){document.documentElement.innerHTML='<body>Preview expired</body>';return true}return false};const __previewTimer=setTimeout(__previewExpired,Math.max(0,__previewExpiry-Date.now()));window.fetch=async(input,init={})=>{if(__previewExpired())throw new Error('Preview expired');const request=input instanceof Request?input:null;const u=new URL(typeof input==='string'?input:input.url,location.href);const method=init.method??request?.method??'GET';if(u.origin!==location.origin||u.pathname!=='/api/projects'||method!=='GET')throw new Error('Offline preview request not recorded');const q=[...u.searchParams.entries()].sort(([a,av],[b,bv])=>a.localeCompare(b)||av.localeCompare(bv));const key='/api/projects?'+new URLSearchParams(q).toString();const row=__previewRecords.get(key);if(!row)throw new Error('Offline preview request not recorded');return new Response(row.body,{status:row.status,headers:{'content-type':'application/json'}})};`;
+  if(!Array.isArray(assets.records)||assets.records.length<2||assets.records.length>12)throw Error('Candidate records exceed bounds');
+  let totalBodyBytes=0;const records:Array<[string,{status:number;body:string}]>=[];const seenKeys=new Set<string>();
+  for(const record of assets.records){if(typeof record.url!=='string'||!Number.isInteger(record.status)||typeof record.body!=='string')throw Error('Malformed candidate response record');const u=new URL(record.url);if(u.origin!=='http://demo.invalid'||u.pathname!=='/api/projects'||[...u.searchParams.keys()].some(k=>!['tenant','limit','cursor'].includes(k))||u.searchParams.getAll('tenant').length!==1||u.searchParams.getAll('limit').length!==1||u.searchParams.get('limit')!=='2'||!['tenant-a','tenant-b'].includes(u.searchParams.get('tenant')!)||u.searchParams.getAll('cursor').length>1||[...u.searchParams.keys()].length!==(u.searchParams.has('cursor')?3:2))throw Error('Candidate response URL outside supported scope');
+   const key=canonical(u);if(seenKeys.has(key))throw Error('Repeated candidate response URL');seenKeys.add(key);if(record.status!==200)throw Error('Candidate demo API rejected supported tenant pagination request');if(record.body.length>32768)throw Error('Candidate response too large');totalBodyBytes+=Buffer.byteLength(record.body);if(totalBodyBytes>32768)throw Error('Candidate responses exceed total bounds');const body=JSON.parse(record.body);if(!body||!Array.isArray(body.items)||body.items.length>2||body.nextCursor!=null&&(typeof body.nextCursor!=='string'||body.nextCursor.length>2048))throw Error('Invalid bounded candidate response');records.push([key,{status:record.status,body:record.body}]);}
+  for(const tenant of ['tenant-a','tenant-b']){const count=records.filter(([key])=>new URL('http://demo.invalid'+key).searchParams.get('tenant')===tenant).length;if(count<1||count>6)throw Error('Tenant response count outside bounds');}
+  const shim=`const __previewExpiry=${expiry};const __previewRecords=new Map(${safeJson(records)});const __previewExpired=()=>{if(Date.now()>=__previewExpiry){document.documentElement.innerHTML='<body>Preview expired</body>';return true}return false};const __previewTimer=setTimeout(__previewExpired,Math.max(0,__previewExpiry-Date.now()));window.fetch=async(input,init={})=>{if(__previewExpired())throw new Error('Preview expired');const request=input instanceof Request?input:null;const u=new URL(typeof input==='string'?input:input.url,location.href);const method=init.method??request?.method??'GET';if(u.origin!==location.origin||u.pathname!=='/api/projects'||method!=='GET')throw new Error('Offline preview request not recorded');const q=[...u.searchParams.entries()].sort(([a,av],[b,bv])=>a.localeCompare(b)||av.localeCompare(bv));if([...u.searchParams.keys()].some(k=>!['tenant','limit','cursor'].includes(k))||u.searchParams.getAll('tenant').length!==1||u.searchParams.getAll('limit').length!==1||u.searchParams.get('limit')!=='2'||!['tenant-a','tenant-b'].includes(u.searchParams.get('tenant'))||u.searchParams.getAll('cursor').length>1)throw new Error('Offline preview request not recorded');const key='/api/projects?'+new URLSearchParams(q).toString();const row=__previewRecords.get(key);if(!row)throw new Error('Offline preview request not recorded');return new Response(row.body,{status:row.status,headers:{'content-type':'application/json'}})};`;
   const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts";
   const html=`<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><div style="padding:.4rem;background:#fff4cc">Offline response scope: recorded tenant-a and tenant-b project-list API responses only; other requests are rejected. This is not an arbitrary application preview. Expires ${new Date(expiry).toISOString()}.</div>${assets.html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,'').replace(/<script\b[^>]*\bsrc=["'][^"']*["'][^>]*>\s*<\/script\s*>/gi,'')}<script>${shim}\n${assets.clientScript.replace(/<\/script/gi,'<\\/script')}</script>`;
   if(html.length>32000)throw Error('Preview HTML exceeds 32000 characters');return{supported:'project-list-demo-v1',html,expiresAt:expiry};
