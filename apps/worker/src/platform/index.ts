@@ -16,6 +16,7 @@ const repoSchema = z.object({ name: z.string().regex(/^[a-z0-9-]{3,64}$/i).trans
 const importRetrySchema = z.object({ importUrl: z.string().min(1).max(512) }).strict();
 const importRefreshSchema = z.object({ ref: z.literal('refs/heads/master') }).strict();
 const grantSchema = z.object({ role: z.enum(['contributor', 'reviewer']), expiresInSeconds: z.number().int().min(60).max(3600) }).strict();
+const grantRenewalSchema = z.object({ expiresInSeconds: z.number().int().min(60).max(3600) }).strict();
 const runnerSessionSchema = z.object({ projectId: z.string().regex(/^[A-Za-z0-9_-]{1,120}$/), expiresInSeconds: z.number().int().min(30).max(120), maxOperations: z.number().int().min(1).max(60) }).strict();
 const safeSource = (s: ProvisionedSource) => ({ ref: s.ref, commitOid: s.commitOid, treeOid: s.treeOid });
 const constantTimeHexEqual = (left: string, right: string) => {
@@ -100,7 +101,7 @@ export class Platform extends DurableObject<Env> {
       if (path === '/runner/sessions' && method === 'POST') return this.createRunnerSession(request);
       if (path === '/internal/source-config' && method === 'POST') return this.sourceConfig(request);
       const session = await this.session(request);
-      const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh|retry)(?:\/([^/]+))?)?$/);
+      const detail = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/(source|agents|refresh|retry)(?:\/([^/]+))?(?:\/(renew))?)?$/);
       if (path === '/repos' && method === 'GET') return json({ repositories: this.rows<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos ORDER BY created DESC').map(row => this.repo(row)) });
       if (path === '/repos' && method === 'POST') {
         if (!this.writeAllowed(request, session)) return fail('FORBIDDEN', 'Authenticated owner session required', 403);
@@ -111,7 +112,7 @@ export class Platform extends DurableObject<Env> {
         return json({ repository: this.repo(provisioned) }, 201);
       }
       if (detail) {
-        const [, owner, name, action, extra] = detail;
+        const [, owner, name, action, extra, operation] = detail;
         const row = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE owner=? AND name=?', owner!, name!);
         if (!row) return fail('NOT_FOUND', 'Repository not found', 404);
         if (!action && method === 'GET') return json({ repository: this.repo(row) });
@@ -141,18 +142,28 @@ export class Platform extends DurableObject<Env> {
           const next = this.one<RepoRow>('SELECT id,owner,ownerId,name,description,project,status,created,artifacts,source,error FROM repos WHERE id=?', row.id)!;
           return json({ repository: this.repo(next) });
         }
-        if (action === 'agents' && method === 'GET') {
+        if (action === 'agents' && !extra && !operation && method === 'GET') {
           if (!session || session.user.id !== row.ownerId) return fail('FORBIDDEN', 'Repository owner required', 403);
           return json({ grants: this.rows<{ id: string; role: string; expires: number }>('SELECT id,role,expires FROM grants WHERE repo=? AND revoked=0 AND expires>? ORDER BY expires', row.id, Date.now()).map(g => ({ id: g.id, role: g.role, expiresAt: g.expires })) });
         }
-        if (action === 'agents' && method === 'POST') {
+        if (action === 'agents' && !extra && !operation && method === 'POST') {
           if (!this.writeAllowed(request, session) || session!.user.id !== row.ownerId) return fail('FORBIDDEN', 'Repository owner required', 403);
           const input = this.parsed(grantSchema, await this.body(request)); if (!input) return fail('INVALID_REQUEST', 'Invalid grant scope', 400);
           const raw = randomToken(), id = crypto.randomUUID(), expires = Date.now() + input.expiresInSeconds * 1000;
           this.ctx.storage.sql.exec('INSERT INTO grants VALUES(?,?,?,?,?,0)', id, row.id, await sha256(raw), input.role, expires);
           return json({ grant: { id, role: input.role, expiresAt: expires }, token: raw }, 201);
         }
-        if (action === 'agents' && extra && method === 'DELETE') {
+        if (action === 'agents' && extra && operation === 'renew' && method === 'POST') {
+          if (!this.writeAllowed(request, session) || session!.user.id !== row.ownerId) return fail('FORBIDDEN', 'Repository owner required', 403);
+          if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(extra)) return fail('NOT_FOUND', 'Grant not found', 404);
+          const input = this.parsed(grantRenewalSchema, await this.body(request)); if (!input) return fail('INVALID_REQUEST', 'Invalid grant renewal', 400);
+          const raw = randomToken(), expires = Date.now() + input.expiresInSeconds * 1000;
+          const changed = this.ctx.storage.sql.exec('UPDATE grants SET token=?,expires=? WHERE id=? AND repo=? AND revoked=0', await sha256(raw), expires, extra, row.id).rowsWritten;
+          if (!changed) return fail('NOT_FOUND', 'Grant not found', 404);
+          const grant = this.one<{ id: string; role: string; expires: number }>('SELECT id,role,expires FROM grants WHERE id=? AND repo=? AND revoked=0', extra, row.id)!;
+          return json({ grant: { id: grant.id, role: grant.role, expiresAt: grant.expires }, token: raw });
+        }
+        if (action === 'agents' && extra && !operation && method === 'DELETE') {
           if (!this.writeAllowed(request, session) || session!.user.id !== row.ownerId) return fail('FORBIDDEN', 'Repository owner required', 403);
           const changed = this.ctx.storage.sql.exec('UPDATE grants SET revoked=1 WHERE id=? AND repo=? AND revoked=0', extra, row.id).rowsWritten;
           return changed ? json({ ok: true }) : fail('NOT_FOUND', 'Grant not found', 404);

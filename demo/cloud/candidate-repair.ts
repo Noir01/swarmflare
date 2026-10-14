@@ -1,0 +1,31 @@
+import { randomUUID } from 'node:crypto';
+import { readFile, writeFile, mkdir, lstat } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { WorkspaceClient } from '../../packages/client/index.js';
+import { runSourceJob } from '../../packages/local-runner/index.js';
+import { verifyViewSource, runViewMandatoryDemoSuite } from '../../packages/local-runner/checks.js';
+import { buildReviewArtifact } from '../../packages/local-runner/review-artifact.js';
+import { buildTenantRepair } from './repair-fixture.js';
+import { ORIGIN } from './foundation-smoke.js';
+const ROOT=resolve('.local/cloud-cont47'),FILE=resolve(ROOT,'repair-private.json'),CACHE=resolve(ROOT,'cache.git'),WORK=resolve(ROOT,'repair');
+async function secret(p:string){const s=await lstat(p);if(s.isSymbolicLink()||!s.isFile()||(s.mode&0o077)!==0)throw Error('PRIVATE_PERMISSIONS');return JSON.parse(await readFile(p,'utf8'));}
+export async function publishRepair(){
+ const initial=await secret(resolve(ROOT,'candidate-private.json')),feedback=await secret(resolve(ROOT,'feedback-private.json')),key=await secret('.local/cloud-cont44/runner-private.json');
+ if(initial.projectId!=='fc34f086-87da-4067-a648-484af2297bd7'||!initial.view||!initial.grant||initial.grant.expiresAt<=Date.now()||!feedback.findingIds?.length)throw Error('REPAIR_SCOPE');
+ let state:any;try{state=await secret(FILE);}catch(e:any){if(e.code!=='ENOENT')throw e;state={ids:{}};await writeFile(FILE,JSON.stringify(state),{mode:0o600,flag:'wx'});}const save=async()=>writeFile(FILE,JSON.stringify(state),{mode:0o600});const id=async(n:string)=>{state.ids[n]??=randomUUID();await save();return state.ids[n];};
+ let count=0;const fetcher:typeof fetch=async(u,options)=>{if(new URL(String(u)).origin!==ORIGIN||++count>60)throw Error('SCOPE_BUDGET');return fetch(u,{...options,redirect:'error',signal:AbortSignal.timeout(20000)});};const client=(token:string)=>new WorkspaceClient({baseUrl:ORIGIN,projectId:initial.projectId,token,fetch:fetcher,maxRequests:60,deadline:120000});const contributor=client(initial.grant.token);
+ const response=await fetcher(ORIGIN+'/api/platform/runner/sessions',{method:'POST',headers:{authorization:'Bearer '+key.key,'content-type':'application/json'},body:JSON.stringify({projectId:initial.projectId,expiresInSeconds:120,maxOperations:60})});if(response.status!==201)throw Error('RUNNER_REFUSED');const issued=await response.json() as any;const runner=client(issued.token),baseline=await contributor.baseline(),original=await contributor.view(initial.viewId);
+ if(!baseline||baseline.commitOid!==initial.baseline.commitOid||baseline.treeOid!==initial.baseline.treeOid||original.data.receipt?.commitOid!==initial.view.commitOid)throw Error('SOURCE_CHANGED');
+ if(!state.source){await mkdir(WORK,{mode:0o700});state.source=await buildTenantRepair({cache:CACHE,viewCommitOid:initial.view.commitOid,baselineCommitOid:baseline.commitOid,workDirectory:WORK});await save();}
+ const revision=state.revisionId?await contributor.revision(state.revisionId):await contributor.publishRevision(initial.changeId,{requestId:await id('revision'),payload:{baseCommitOid:baseline.commitOid,commitOid:state.source.commitOid,treeOid:state.source.treeOid,obligationIds:['legacy-response','pagination-order','cursor-validation','tenant-isolation','ui-navigation','ui-tenant-switch'],decisionRevisions:[],dependencies:[]}});state.revisionId=revision.id;await save();
+ if(revision.data.status!=='published'){const job=await runSourceJob(runner,{remote:CACHE,workspaceRoot:ROOT,resolveRepository:()=>WORK,requestId:await id('publish'),sourceBackend:'artifacts-git'});if(job?.data.status!=='completed')throw Error('PUBLICATION_FAILED');}
+ for(const findingId of feedback.findingIds){const finding=await contributor.finding(findingId);if(finding.data.status==='open')await contributor.proposeRepair(findingId,{requestId:await id('repair-'+findingId),expectedVersion:finding.version,payload:{revisions:[{changeId:initial.changeId,revisionId:revision.id}]}});}
+ const created=state.viewId?await contributor.view(state.viewId):await contributor.createView({requestId:await id('view'),payload:{...original.data.manifest,orderedRevisions:[{changeId:initial.changeId,revisionId:revision.id}]}});state.viewId=created.id;await save();
+ if(created.data.status!=='runnable'){const job=await runSourceJob(runner,{remote:CACHE,workspaceRoot:ROOT,resolveRepository:()=>WORK,requestId:await id('compose'),sourceBackend:'artifacts-git'});if(job?.data.status!=='completed')throw Error('COMPOSITION_FAILED');}
+ const view=await contributor.view(created.id);if(!view.data.receipt||view.data.receipt.backend!=='artifacts-git'||view.data.receipt.treeOid!==state.source.treeOid)throw Error('VIEW_READBACK');
+ await verifyViewSource(runner,{remote:CACHE,viewId:view.id,requestId:await id('verify')});const checks=await runViewMandatoryDemoSuite(runner,{remote:CACHE,workspaceRoot:ROOT,viewId:view.id,projectId:initial.projectId,requestId:await id('checks')});const artifact=await buildReviewArtifact(runner,{remote:CACHE,workspaceRoot:ROOT,viewId:view.id});
+ if(JSON.stringify(await contributor.baseline())!==JSON.stringify(baseline)||JSON.stringify(await contributor.view(original.id))!==JSON.stringify(original))throw Error('PRESERVATION_FAILED');
+ state.view=view.data.receipt;state.checks=checks.map(c=>({checkId:c.data.checkId,result:c.data.result,id:c.id}));state.artifactId=artifact.id;await save();const result={provenance:'Actual native full baseline-parented owner repair publication/composition/readback and mandatory API/UI suites; no self review/resolution or human acceptance.',viewId:view.id,revisionId:revision.id,source:state.source,view:state.view,checks:state.checks,baselineUnchanged:true,originalViewUnchanged:true};await writeFile('reports/evaluation/continuous47-native-repair.json',JSON.stringify(result,null,2));return result;
+}
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))publishRepair().then(x=>console.log(JSON.stringify(x))).catch(e=>{console.error(JSON.stringify({code:/^[A-Z_]{1,64}$/.test(e.message)?e.message:'REPAIR_FAILED',status:e.status}));process.exitCode=1;});
