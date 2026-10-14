@@ -83,3 +83,25 @@ it('refreshes an artifact under a new request ID, refuses stale applicability, a
   const bindings=await dashboardBindings(f.projectId),{cookie}=await dashboardLogin(bindings,f.projectId);
   expect((await worker.fetch(dashboardRequest(`/dashboard/preview/${f.view.id}`,{Cookie:cookie}),bindings)).status).toBe(404);
 });
+
+it('appends a new runner-owned artifact after an earlier producer preview expires',async()=>{
+  const f=await acceptanceFixture(),path=`/runner/views/${f.view.id}/review-artifacts`,baseline={version:1,commitOid:f.baseline.commitOid,treeOid:f.baseline.treeOid};
+  const payload=(html:string,expiresAt:number)=>({applicability:f.applicability,baseline,diff:{patch:'exact pinned source diff',files:['src/main.ts'],truncated:false},preview:{supported:'project-list-demo-v1' as const,html,expiresAt}});
+  const first=await f.request('runner',path,payload('<h1>first producer</h1>',Date.now()+110_000),undefined,'producer-one');expect(first.status).toBe(201);
+  const stub=env.PROJECTS.get(env.PROJECTS.idFromName(f.projectId));
+  const before=await runInDurableObject(stub,async(_instance,state)=>state.storage.sql.exec<{id:string,owner:string,version:number,data:string}>('SELECT id,owner,version,data FROM resources WHERE id=?',first.body.resource.id).one());
+  const oldData=JSON.parse(before.data);oldData.preview.expiresAt=Date.now()-1;
+  await runInDurableObject(stub,async(_instance,state)=>state.storage.sql.exec('UPDATE resources SET data=? WHERE id=?',JSON.stringify(oldData),before.id));
+  const expiredBefore=await runInDurableObject(stub,async(_instance,state)=>state.storage.sql.exec<{id:string,owner:string,version:number,data:string}>('SELECT id,owner,version,data FROM resources WHERE id=?',before.id).one());
+  const actorId='runner-refresh';const token='fixture-only-runner-refresh';
+  const bindings={...env,AUTH_CREDENTIALS:JSON.stringify([{id:actorId,projectId:f.projectId,role:'runner',expiresAt:Date.now()+120_000,tokenHash:await hash(token)}])} as Env;
+  const refreshedResponse=await worker.fetch(new Request(`https://local/api/v1/projects/${f.projectId}${path}`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({requestId:'producer-two',payload:payload('<h1>fresh producer</h1>',Date.now()+60_000)})}),bindings);
+  expect(refreshedResponse.status).toBe(201);
+  const refreshed=(await refreshedResponse.json() as any).resource;
+  expect(refreshed.id).not.toBe(first.body.resource.id);expect(refreshed.version).toBe(1);expect(refreshed.owner).toBe(actorId);
+  const after=await runInDurableObject(stub,async(_instance,state)=>state.storage.sql.exec<{id:string,owner:string,version:number,data:string}>('SELECT id,owner,version,data FROM resources WHERE id=?',before.id).one());
+  expect(after).toEqual(expiredBefore);
+  expect((await f.request('human',`/views/${f.view.id}/review-artifact`)).body.resource).toEqual(refreshed);
+  expect(refreshed.data.applicability).toEqual(f.applicability);expect(refreshed.data.baseline).toEqual(baseline);
+  expect(refreshed.data.diff).toEqual({patch:'exact pinned source diff',files:['src/main.ts'],truncated:false});
+});
